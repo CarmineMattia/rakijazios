@@ -1,6 +1,6 @@
-# Rakazo Online
+# Rakijazios
 
-Rakazo Online is our self-hosted, customized **Rakazo** running on Host-002. The goal is a more
+Rakijazios is our self-hosted, customized **Rakazo** running on Host-001. The goal is a more
 **social** product: people find each other by `@handle` or email, have profile pictures, join
 shared conversations with humans and bots, and invite others with a share link.
 
@@ -135,7 +135,7 @@ Web UI on `:5173`, API on `:3100`. Services: web, api, worker, supervisor, postg
   `declined_at` and an index on first invite/search use (`space-invites.sql` has the same SQL for
   operators who prefer to apply it up front). `group-access.ts` creates `group_shares` and
   `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start.
-- **This checkout is not the running stack.** The live containers on Host-002 bind-mount
+- **This checkout is not the running stack.** The live containers on Host-001 bind-mount
   `/home/cr1m3/projects/rakazo/patches`. Changes are copied there and the affected service is
   restarted. Check the mounts before applying changes; editing this repo alone does not update the
   running stack. As of 2026-10-08 the runtime patch files tracked here match the live stack
@@ -278,7 +278,7 @@ RAKAZO_TEST_URL=http://127.0.0.1:5173 node tests/social-smoke.mjs
 
 - Never commit real `.env` values, SMTP keys, auth secrets or API keys. Keep LAN/tunnel origins
   (`WEB_ORIGIN`, `BETTER_AUTH_URL`, `API_URL`, `RAKAZO_HOST`) in the local `.env` only.
-- All Rakazo / Host-002 patches belong in this repository.
+- All Rakazo / Host-001 patches belong in this repository.
 - Test databases get schema only, never private data.
 
 ## Roadmap
