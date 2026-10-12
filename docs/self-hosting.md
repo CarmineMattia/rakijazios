@@ -99,9 +99,31 @@ file, so firewall it if it shouldn't be reachable.
 
 Let your bots use a model running on **your** computer (no open ports; an outbound runner):
 
-- ✅ **Now (M1, operator path):** see the steps below and [runner/README.md](../runner/README.md).
-- 🚧 **Coming (M2a, PR #7):** **Settings → My hardware → Add a computer** gives you one command
-  (or a Windows installer) that installs and pairs the runner for you.
+- ✅ **M2a (recommended):** **Settings → My hardware → Add a computer**, steps below.
+- ✅ **M1 (operator path, still supported):** see [M1 steps](#m1-steps-operator) and [runner/README.md](../runner/README.md).
+
+### M2a steps: connect computers from the web
+
+Needs the flag `RAKAZO_LOCAL_RUNNERS_UI=1` on the api (set in the compose override). As-built
+notes: [`m2-plan.md` §12](m2-plan.md#12-m2a-as-built-2026-10-08).
+
+1. **Settings → My hardware → Add a computer.** The dialog detects the OS:
+   - Linux/macOS: one `curl … | sh -s -- --code XXXX-XXXX` command;
+   - Windows: a downloadable `.cmd` with the code inside.
+
+   The installer gets Node.js if needed (portable, checksum-verified), installs the pinned runner,
+   pairs, starts it, and sets up autostart (systemd --user / launchd / Startup folder). The dialog
+   flips to **connected** by itself.
+   - On a computer that already runs a runner (M1 `start.sh` or an earlier install), it keeps the
+     existing connection and only upgrades and restarts the runner.
+   - Anything ambiguous (another server or account) is refused without changes. `--replace`
+     connects it as a new computer.
+   - Only one runner ever uses a config folder (see
+     [`runner/README.md`](../runner/README.md#existing-installs-upgrade-replace-one-runner-per-folder)).
+2. Switch on the models to offer (all start off). Per computer you can **Rename**,
+   **Pause sharing**, use **New key** (rotate) and **Remove** (revoke). Up to 10 computers per account.
+3. Binding bots to a computer from the UI, and grants for shared groups, come in M2b/M2c. Until
+   then, a `shared-local` bot uses any online computer of its owner that offers its model.
 
 ### M1 steps (operator)
 

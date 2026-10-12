@@ -44,10 +44,10 @@
 | ✅ | **Your own model key** (OpenRouter or any OpenAI-compatible server) | Settings → Models |
 | ✅ | **Share your local AI, M1**: a bot answers from the owner's own computer (operator setup) | [runner/](runner/README.md) |
 | ✅ | **Rakijazios brand** + translated UI | Everywhere |
-| 🚧 | **My hardware (M2a)**: connect a computer from the web in one step | PR #7 |
+| ✅ | **My hardware (M2a)**: connect a computer from the web in one step | Settings → My hardware |
 | 🔮 | Set a password (optional), verified email domain | [Roadmap](docs/roadmap.md) |
 | 🔮 | Bot publishing + **marketplace** | [Roadmap](docs/roadmap.md) |
-| 🔮 | **Device control** (Browser / Computer toggles) and **Live voice** | PR #8 |
+| 🔮 | **Device control** (Browser / Computer toggles) and **Live voice** | [Roadmap](docs/roadmap.md#device-control-mode-long-term-after-m5) |
 
 ✅ done · 🚧 in progress · 🔮 planned. Full details: [docs/architecture.md](docs/architecture.md#features-in-detail).
 
@@ -104,13 +104,14 @@
 | | Item | One line | Details |
 |---|---|---|---|
 | ✅ | **M1** Local AI prototype | A bot answers from its owner's computer via an outbound runner | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
-| 🚧 | **M2** Pairing UI + grants | M2a My hardware (PR #7) → M2b pick a computer per bot → M2c shared groups | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
+| 🚧 | **M2** Pairing UI + grants | ✅ M2a My hardware → M2b pick a computer per bot → M2c shared groups | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | 🔮 | **M3** Limits & usage | Fair-use limits and usage numbers for shared hardware | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | 🔮 | **M4** Marketplace tie-in | Public bots that can run on shared hardware | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | 🔮 | **M5** Device node app | Desktop/phone app: chat + one-click local model + built-in runner | [share-local-ai §13](docs/share-local-ai.md#13-vision-rakijazios-app-as-a-device-node-m5) |
 | 🔮 | **Bot marketplace** | Publish bots, find them, add them to your chats | [roadmap](docs/roadmap.md#bot-marketplace) |
-| 🔮 | **Device control mode** | 🌐 Browser + 🖥️ Computer toggles, opt-in, every action approved on the device | PR #8 |
-| 🔮 | **Live voice mode** | Click a bot's avatar → it greets you and you talk live | PR #8 |
+| 🔮 | **Model advisor** | "What can my computer run?": detected hardware → recommended models, one-click install, optional planner model | [roadmap](docs/roadmap.md#model-advisor-after-m2) |
+| 🔮 | **Device control mode** | 🌐 Browser + 🖥️ Computer toggles, opt-in, every action approved on the device | [roadmap](docs/roadmap.md#device-control-mode-long-term-after-m5) |
+| 🔮 | **Live voice mode** | Click a bot's avatar → it greets you and you talk live | [roadmap](docs/roadmap.md#live-voice-mode-long-term) |
 
 Full list (incl. password flow, email domain, bot visibility): **[docs/roadmap.md](docs/roadmap.md)**.
 

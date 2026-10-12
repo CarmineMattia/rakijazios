@@ -136,6 +136,13 @@ RAKAZO_TEST_URL=http://127.0.0.1:5173 node tests/social-smoke.mjs
   (`onboarding@resend.dev`), magic links are only delivered to the Resend account owner's address;
   other recipients are rejected. Real multi-user sign-up needs a verified domain and `EMAIL_FROM`.
 - **No password flow for magic-only users** yet (planned in Settings).
+- **Local runners (M2a).**
+  - macOS and Windows installers are written and unit-checked, but were only tested end to end on
+    Linux.
+  - Pairing failures are rate-limited per client address (10 per 10 min) and globally (300 per
+    10 min). A determined attacker can still delay pairing for others for up to 10 minutes; real
+    edge rate limits come with M3.
+  - Bots aren't bound to a specific computer until M2b.
 
 ## Safety
 

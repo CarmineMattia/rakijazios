@@ -79,7 +79,7 @@ rakijazios/                      (local checkout on Host-001: ~/projects/rakazo-
 - **Which file is mounted where:** read `docker-compose.override.yml`. It's the source of truth.
   The api and worker sections list the same adapter files.
 - **Overlays loaded by `patches/web/dist/index.html`:** `magic-auth` (`?v=sentfix1`), `invite`,
-  `social`, `stream-watchdog`, `group-sharing`, `ui-tweaks`, `account-avatar`.
+  `social`, `stream-watchdog`, `group-sharing`, `ui-tweaks`, `account-avatar`, `local-hardware` (M2a).
   `computer-settings-overlay.js` and `bot-time-prefs.js` are present but **not loaded**.
   - New overlay = new file in `dist/` + a `<script defer>` tag in `index.html`.
   - Bump a `?v=` query when you change an overlay that browsers may have cached.
@@ -192,9 +192,17 @@ docker run --rm -v "$PWD:/r:ro,z" --entrypoint sh ghcr.io/elie222/rakazo/app:edg
 
 - `node tests/social-smoke.mjs` (or `RAKAZO_TEST_URL=http://127.0.0.1:5173 node tests/social-smoke.mjs`):
   creates and removes disposable `example.invalid` accounts.
-- **Browser e2e (puppeteer):** M2a adds `e2e/m2a/` with its own README (PR #7). The scripts use
-  test accounts and throwaway runner dirs, never print secrets, and **must run one at a time**
-  (they share browser profiles).
+- **Browser e2e (puppeteer), `e2e/m2a/`** ([README](e2e/m2a/README.md)): `50-m2a-pair.mjs`
+  (add/pause/rename/new key/remove + abuse cases), `51-m2a-owner-view.mjs` (read-only, needs
+  `RK_OWNER_EMAIL`), `52-m2a-migrate.mjs` (install over an M1/earlier runner). They use test
+  accounts, a throwaway `HOME` / `RAKAZO_RUNNER_CONFIG_DIR` / `RAKAZO_RUNNER_SERVICE`, never print
+  secrets (they count leaks in logs and expect 0), and **must run one at a time** (shared
+  browser profiles).
+  ```bash
+  npm i --prefix /tmp/rk-e2e-npm puppeteer-core    # once
+  cd e2e/m2a && node 50-m2a-pair.mjs && node 52-m2a-migrate.mjs   # exit 0 = all passed
+  ```
+  Never point them at the owner's real `~/.config/rakazo-runner` or default service.
 
 </details>
 
@@ -269,8 +277,9 @@ Known limits / not covered: <…>
 |---|---|
 | Roadmap summary / full list | [README → Roadmap](README.md#roadmap) · [docs/roadmap.md](docs/roadmap.md) |
 | Share your local AI (M1–M5), decisions D1…, threat model | [docs/share-local-ai.md](docs/share-local-ai.md) |
-| M2 plan / M2a as built | `docs/m2-plan.md` (PR #7) |
-| Device control mode, Live voice mode | PR #8 (`docs/share-local-ai.md` §14, `docs/live-voice-mode.md`) |
+| M2 plan / M2a as built | [docs/m2-plan.md](docs/m2-plan.md) |
+| Device control mode, Live voice mode | [docs/share-local-ai.md §14](docs/share-local-ai.md), [docs/live-voice-mode.md](docs/live-voice-mode.md) |
+| Model advisor (hardware → model picks, planner model) | [docs/model-advisor.md](docs/model-advisor.md) |
 | Architecture, patches, API | [docs/architecture.md](docs/architecture.md) |
 | Live stack, deploys, tests, known limits | [docs/operations.md](docs/operations.md) |
 | Runner usage | [runner/README.md](runner/README.md) |

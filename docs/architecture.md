@@ -58,12 +58,21 @@ detail. Short version in the [README](../README.md); hands-on rules for coding a
 - **Dist overlays.** The whole patched web `dist` is one read-only mount. Instead of rebuilding the
   minified bundle, `patches/web/dist/index.html` loads plain-JS overlays with `<script defer>`:
   `magic-auth` (`?v=sentfix1`), `invite`, `social`, `stream-watchdog`, `group-sharing`,
-  `ui-tweaks` and `account-avatar`, in that order. (`computer-settings-overlay.js` and
+  `ui-tweaks`, `account-avatar` and `local-hardware` (Settings → My hardware, shown only when the
+  api has `RAKAZO_LOCAL_RUNNERS_UI=1`), in that order. (`computer-settings-overlay.js` and
   `bot-time-prefs.js` are in the tree but not loaded by `index.html`.)
 - **Database changes are additive and idempotent.** `space-invites.ts` adds `target_user_id`,
   `declined_at` and an index on first invite/search use (`space-invites.sql` has the same SQL for
   operators who prefer to apply it up front). `group-access.ts` creates `group_shares` and
-  `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start.
+  `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start
+  and, since M2a, adds its new columns plus `local_runner_pairings` and `local_runner_models`.
+- **Web proxy config.** `patches/web/vite.config.ts` replaces the image's `vite.config.ts` and adds
+  one change: the `/api/local-runners` proxy, with WebSocket upgrade and `X-Forwarded-For`. Runners
+  then connect through the web origin, so no extra port is opened.
+- **Runner bundle.** The repo `runner/` directory is mounted read-only into the api
+  (`/app/apps/api/local-runner-bundle`). The installers serve exactly those files, pinned with
+  SHA-256. On the live stack, copy `runner/package.json` and `runner/src/*.ts` to
+  `<live>/runner/` next to `patches/`.
 
 ## Features in detail
 
