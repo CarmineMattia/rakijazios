@@ -135,7 +135,7 @@ Web UI on `:5173`, API on `:3100`. Services: web, api, worker, supervisor, postg
   `declined_at` and an index on first invite/search use (`space-invites.sql` has the same SQL for
   operators who prefer to apply it up front). `group-access.ts` creates `group_shares` and
   `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start.
-- **This checkout is not the running stack.** The live containers on Host-001 bind-mount
+- **This checkout is not the running stack.** The live containers on Host-002 bind-mount
   `/home/cr1m3/projects/rakazo/patches`. Changes are copied there and the affected service is
   restarted. Check the mounts before applying changes; editing this repo alone does not update the
   running stack. As of 2026-10-08 the runtime patch files tracked here match the live stack
