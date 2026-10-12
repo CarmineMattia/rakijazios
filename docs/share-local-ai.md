@@ -2,7 +2,7 @@
 
 Status: **M1 implemented** (owner-only, same-host prototype; see §10 → M1 as built). M2+ is design only.  
 Related roadmap: README → Roadmap → Share your local AI / Bot marketplace / Device node app (M5).  
-Audience: implementers of `rakijazios` overlays and any future upstream contribution.
+Audience: implementers of `rakazo-online` overlays and any future upstream contribution.
 
 ## 1. Problem
 
