@@ -36,3 +36,10 @@ describe("protocol codec", () => {
     assert.throws(() => decodeFrame("not-json"), /Invalid JSON/);
   });
 });
+
+it("health frames (0.2.3): runner health is a client frame, health.check a server frame", () => {
+  const health = decodeFrame(encodeFrame({ type: "health", modelServer: "ollama", modelServerOk: true, models: 3, inFlight: 0, uptimeSec: 5, checkId: "c1", latencyMs: 12 }));
+  assert.equal(isClientFrame(health), true);
+  const check = decodeFrame(encodeFrame({ type: "health.check", id: "c1" }));
+  assert.equal(isServerFrame(check), true);
+});

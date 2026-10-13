@@ -12,6 +12,7 @@
  *   POST /api/local-runners/devices/:id/models       {modelId, enabled}
  *   POST /api/local-runners/devices/:id/rotate                    → new code for the same computer
  *   POST /api/local-runners/devices/:id/revoke
+ *   POST /api/local-runners/devices/:id/check                     → re-check the computer now (health)
  * Runner (no cookie; the one-time code is the credential):
  *   POST /api/local-runners/pair                     {code, name, platform, runnerVersion, existing?}
  * Public installer files (no secrets):
@@ -23,7 +24,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@rakazo/db";
 import type { Context, Hono } from "hono";
 import type { LocalRunnerGateway } from "./local-runners.js";
-import { ensureLocalRunnerTables } from "./local-runners.js";
+import { ensureLocalRunnerTables, iso, LATEST_RUNNER_VERSION, runnerUpdateAvailable } from "./local-runners.js";
 import {
   FailureLimiter,
   MAX_DEVICES_PER_USER,
@@ -300,6 +301,16 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
             modelServer: live.modelServer,
             platform: d.platform,
             runnerVersion: d.runner_version,
+            latestRunnerVersion: LATEST_RUNNER_VERSION,
+            updateAvailable: runnerUpdateAvailable(live.runnerVersion ?? d.runner_version),
+            health: {
+              report: live.health ?? null,
+              inFlight: live.inFlight ?? 0,
+              answers: live.answers ?? 0,
+              lastAnswerAt: iso(live.lastAnswerAt),
+              lastFailure: live.lastFailure ? { message: live.lastFailure.message, at: iso(live.lastFailure.at) } : null,
+              lastDisconnect: live.lastDisconnect ? { reason: live.lastDisconnect.reason, at: iso(live.lastDisconnect.at) } : null,
+            },
             lastSeenAt: d.last_seen_at ? new Date(d.last_seen_at).toISOString() : null,
             createdAt: new Date(d.created_at).toISOString(),
             legacy: d.paired_via !== "pairing",
@@ -453,6 +464,21 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
       );
       gateway.disconnectDevice(device.id, "rotated");
       return c.json(await createPairing(uid, { os: normalizeOs(body.os), deviceId: device.id }));
+    }),
+  );
+
+  app.post(
+    "/api/local-runners/devices/:id/check",
+    route(async (c) => {
+      const uid = await userId(c);
+      const device = await ownedDevice(uid, c.req.param("id")!);
+      await readBody(c);
+      const result = await gateway.checkDevice(device.id);
+      if (!result.online) return c.json({ online: false, checkedAt: new Date().toISOString() });
+      if (!result.supported) {
+        return c.json({ online: true, supported: false, runnerVersion: result.runnerVersion, latestRunnerVersion: LATEST_RUNNER_VERSION, checkedAt: new Date().toISOString() });
+      }
+      return c.json({ online: true, supported: true, health: result.health, checkedAt: new Date().toISOString() });
     }),
   );
 

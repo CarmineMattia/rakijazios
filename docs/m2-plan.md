@@ -586,3 +586,11 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
   - qa2 can't list or set grants (404); anonymous gets 401;
   - 0 secrets in the logs.
 - The M2b e2e (`60`) still passes 20/20.
+
+## 15. Runner health / status visibility (branch `feat/runner-health`, runner 0.2.3)
+
+- **Protocol (additive):** runner → server `health {modelServer, modelServerOk, models, inFlight, uptimeSec, latencyMs?, lastError?, lastErrorAt?, checkId?}`; server → runner `health.check {id}`. The runner sends `health` after connecting, whenever it changes (model server found/lost, new local error) and in answer to a check (re-probes the loopback model server first). Errors are cut to 200 chars; no paths, codes or tokens.
+- **Gateway:** keeps the last sanitized report per session, plus per-computer in-memory stats (answers, last answer, last failed answer, last disconnect + reason; reset when the api restarts). `checkDevice(id)` sends `health.check` only to runners ≥ 0.2.3 (older runners would just log "bad frame") and waits up to 8 s.
+- **API:** `GET /api/local-runners/devices` adds `health`, `updateAvailable`, `latestRunnerVersion`. New `POST /api/local-runners/devices/:id/check` (owner only, 404 otherwise) → `{online:false}` | `{online:true, supported:false, runnerVersion}` | `{online:true, supported:true, health}`.
+- **UI (My hardware card):** health line (model server OK / not answering, answering now, last answer, last problem, last disconnect), a "Check now" button with a plain-language result, and an "Update available" hint for runners older than 0.2.3 (press New key and run the command on that computer; it keeps this computer and its settings).
+- No DB changes. No new ports; the runner stays outbound-only and only dials loopback.

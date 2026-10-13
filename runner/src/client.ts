@@ -63,6 +63,9 @@ export class LocalRunnerClient {
   private policy: { enabled: boolean; allowed: Set<string> | null } = { enabled: true, allowed: null };
   private unauthorized = 0;
   private connected = false;
+  private readonly startedAt = Date.now();
+  private lastError: { message: string; at: number } | null = null;
+  private healthKey = "";
 
   constructor(opts: RunnerOptions) {
     this.opts = opts;
@@ -113,6 +116,7 @@ export class LocalRunnerClient {
       this.server = found ? { kind: found.kind, baseUrl: found.baseUrl } : null;
       this.models = filterModels(found?.models ?? [], this.opts.modelFilter);
     }
+    if (!this.server) this.noteError("No local model server is answering on this computer");
     const key = `${this.server?.baseUrl ?? ""}|${this.models.map((m) => `${m.id}:${m.contextWindow ?? ""}`).join(",")}`;
     if (key !== this.modelsKey) {
       this.modelsKey = key;
@@ -124,6 +128,40 @@ export class LocalRunnerClient {
       if (this.connected) this.sendModels();
       this.status(this.connected ? "connected" : "connecting");
     }
+  }
+
+  /** Remember the last local problem (short, no paths or secrets) for the owner's health view. */
+  private noteError(message: string): void {
+    const short = message.replace(/\s+/g, " ").slice(0, 200);
+    if (this.lastError?.message === short && Date.now() - this.lastError.at < 60_000) return;
+    this.lastError = { message: short, at: Date.now() };
+    this.sendHealth();
+  }
+
+  /** Send `health` when it changed (or always, for a check). */
+  private sendHealth(checkId?: string, latencyMs?: number): void {
+    if (!this.connected) return;
+    const frame = {
+      type: "health" as const,
+      modelServer: this.server?.kind ?? "none",
+      modelServerOk: Boolean(this.server),
+      models: this.models.length,
+      inFlight: this.inFlight.size,
+      uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
+      ...(this.lastError ? { lastError: this.lastError.message, lastErrorAt: this.lastError.at } : {}),
+      ...(checkId ? { checkId } : {}),
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+    };
+    const key = `${frame.modelServer}|${frame.modelServerOk}|${frame.models}|${this.lastError?.at ?? ""}`;
+    if (!checkId && key === this.healthKey) return;
+    this.healthKey = key;
+    this.send(frame);
+  }
+
+  private async healthCheck(id: string): Promise<void> {
+    const t0 = Date.now();
+    await this.refreshModels().catch((err) => this.noteError(`Model server check failed: ${err instanceof Error ? err.message : String(err)}`));
+    this.sendHealth(id.slice(0, 64), Date.now() - t0);
   }
 
   private sendModels(): void {
@@ -298,6 +336,8 @@ export class LocalRunnerClient {
           this.reconnectAttempt = 0;
           this.status("connected");
           this.sendModels();
+          this.healthKey = "";
+          this.sendHealth();
         }
         this.policy = {
           enabled: frame.enabled !== false,
@@ -324,6 +364,9 @@ export class LocalRunnerClient {
         }
         return;
       }
+      case "health.check":
+        await this.healthCheck(frame.id);
+        return;
       case "infer.request":
         await this.handleInfer(frame);
         return;
@@ -367,6 +410,7 @@ export class LocalRunnerClient {
       });
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
+        this.noteError(`Model ${frame.model}: local model server answered HTTP ${res.status}`);
         this.send({
           type: "infer.error",
           id: frame.id,
@@ -408,6 +452,7 @@ export class LocalRunnerClient {
       }
       const message = err instanceof Error ? err.message : String(err);
       this.log(`infer.error id=${frame.id}: ${message}`);
+      this.noteError(`Model ${frame.model}: ${message}`);
       this.send({
         type: "infer.error",
         id: frame.id,

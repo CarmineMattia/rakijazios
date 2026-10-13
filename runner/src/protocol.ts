@@ -65,6 +65,28 @@ export type PolicyFrame = {
   allowedModels?: string[];
 };
 
+/**
+ * Runner health (0.2.3+): sent after connecting, whenever it changes, and in answer to a
+ * `health.check` (then `checkId` echoes the request). Never contains secrets or paths.
+ */
+export type HealthFrame = {
+  type: "health";
+  checkId?: string;
+  modelServer: string;
+  modelServerOk: boolean;
+  models: number;
+  /** Round trip to the local model server's model list, when just checked. */
+  latencyMs?: number;
+  inFlight: number;
+  uptimeSec: number;
+  /** Last local problem (model server unreachable, last failed answer), short text. */
+  lastError?: string;
+  lastErrorAt?: number;
+};
+
+/** Owner pressed "Check now": re-probe the local model server and answer with `health`. */
+export type HealthCheckFrame = { type: "health.check"; id: string };
+
 /** reason: "revoked" | "rotated" | "replaced" | "maintenance" | … */
 export type ByeFrame = { type: "bye"; reason?: string };
 
@@ -74,14 +96,16 @@ export type ClientToServerFrame =
   | ModelsFrame
   | InferChunkFrame
   | InferDoneFrame
-  | InferErrorFrame;
+  | InferErrorFrame
+  | HealthFrame;
 
 export type ServerToClientFrame =
   | HeartbeatAckFrame
   | InferRequestFrame
   | InferCancelFrame
   | PolicyFrame
-  | ByeFrame;
+  | ByeFrame
+  | HealthCheckFrame;
 
 export type ProtocolFrame = ClientToServerFrame | ServerToClientFrame;
 
@@ -92,6 +116,7 @@ const CLIENT_TYPES = new Set([
   "infer.chunk",
   "infer.done",
   "infer.error",
+  "health",
 ]);
 
 const SERVER_TYPES = new Set([
@@ -100,6 +125,7 @@ const SERVER_TYPES = new Set([
   "infer.cancel",
   "policy",
   "bye",
+  "health.check",
 ]);
 
 export function encodeFrame(frame: ProtocolFrame): string {

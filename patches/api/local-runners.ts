@@ -131,13 +131,85 @@ type RunnerSession = {
   platform: string | null;
   runnerVersion: string;
   inFlight: Set<string>;
+  health: RunnerHealth | null;
+};
+
+/** What a 0.2.3+ runner reports about itself (sanitized). */
+export type RunnerHealth = {
+  modelServer: string;
+  modelServerOk: boolean;
+  models: number;
+  inFlight: number;
+  uptimeSec: number;
+  latencyMs?: number;
+  lastError?: string;
+  lastErrorAt?: number;
+  at: number;
 };
 
 export type DeviceLiveInfo = {
   online: boolean;
   connectedAt: number | null;
   modelServer: string | null;
+  /** Health view (in memory, since the api started). */
+  runnerVersion?: string | null;
+  health?: RunnerHealth | null;
+  inFlight?: number;
+  answers?: number;
+  lastAnswerAt?: number | null;
+  lastFailure?: { message: string; at: number } | null;
+  lastDisconnect?: { reason: string; at: number } | null;
 };
+
+export type DeviceCheckResult =
+  | { online: false }
+  | { online: true; supported: false; runnerVersion: string }
+  | { online: true; supported: true; health: RunnerHealth };
+
+/** Version of the runner bundle this server hands out (keep in sync with runner/src/index.ts). */
+export const LATEST_RUNNER_VERSION = "0.2.3";
+
+export function runnerUpdateAvailable(version: string | null | undefined): boolean {
+  if (!version) return false;
+  return !runnerSupportsHealth(version);
+}
+
+export function iso(ms: number | null | undefined): string | null {
+  return ms ? new Date(ms).toISOString() : null;
+}
+
+/** Runners from this version on answer `health.check`. */
+export const HEALTH_MIN_VERSION = [0, 2, 3];
+
+export function runnerSupportsHealth(version: string | null | undefined): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!m) return false;
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+  for (let i = 0; i < 3; i++) if (v[i] !== HEALTH_MIN_VERSION[i]) return v[i]! > HEALTH_MIN_VERSION[i]!;
+  return true;
+}
+
+function shortText(value: unknown, max = 200): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const t = value.replace(/[\u0000-\u001f]+/g, " ").trim();
+  return t ? t.slice(0, max) : undefined;
+}
+
+export function sanitizeHealth(frame: Record<string, unknown>): RunnerHealth {
+  const num = (v: unknown, max: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(Math.round(v), max) : 0);
+  const at = num(frame.lastErrorAt, 1e15);
+  const lastError = shortText(frame.lastError);
+  return {
+    modelServer: shortText(frame.modelServer, 40) ?? "none",
+    modelServerOk: frame.modelServerOk === true,
+    models: num(frame.models, 10_000),
+    inFlight: num(frame.inFlight, 1000),
+    uptimeSec: num(frame.uptimeSec, 1e9),
+    ...(typeof frame.latencyMs === "number" ? { latencyMs: num(frame.latencyMs, 600_000) } : {}),
+    ...(lastError ? { lastError, lastErrorAt: at || Date.now() } : {}),
+    at: Date.now(),
+  };
+}
 
 const ready = new WeakMap<PrismaClient, Promise<void>>();
 
@@ -327,6 +399,8 @@ export type LocalRunnerGateway = {
   disconnectDevice: (deviceId: string, reason: string) => void;
   /** M2b: models this computer can serve right now (advertised live AND switched on). */
   offeredModels: (deviceId: string) => string[];
+  /** Health: ask the runner to re-check its model server now (8 s timeout). */
+  checkDevice: (deviceId: string) => Promise<DeviceCheckResult>;
   /** M2c: stop in-flight answers of a bot in a group (grant revoked). Returns how many. */
   cancelBotInGroup: (botId: string, groupId: string) => number;
 };
@@ -391,6 +465,18 @@ export function createLocalRunnerGateway(deps: {
   const sessionsByDevice = new Map<string, RunnerSession>();
   const sessionsByUser = new Map<string, Set<RunnerSession>>();
   const pending = new Map<string, PendingInfer>();
+  // Health view per computer, kept across reconnects (in memory; resets when the api restarts).
+  type DeviceStats = { answers: number; lastAnswerAt: number | null; lastFailure: { message: string; at: number } | null; lastDisconnect: { reason: string; at: number } | null };
+  const stats = new Map<string, DeviceStats>();
+  const statsFor = (deviceId: string): DeviceStats => {
+    let st = stats.get(deviceId);
+    if (!st) {
+      st = { answers: 0, lastAnswerAt: null, lastFailure: null, lastDisconnect: null };
+      stats.set(deviceId, st);
+    }
+    return st;
+  };
+  const checks = new Map<string, { deviceId: string; resolve: (h: RunnerHealth | null) => void }>();
   const failedHellos = new Map<string, { count: number; resetAt: number }>();
   const wsMod = loadWs();
   const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
@@ -427,6 +513,7 @@ export function createLocalRunnerGateway(deps: {
   function dropSession(session: RunnerSession, reason: string, closeCode = 1000): void {
     if (sessionsByDevice.get(session.deviceId) === session) {
       sessionsByDevice.delete(session.deviceId);
+      if (reason !== "replaced") statsFor(session.deviceId).lastDisconnect = { reason: reason.slice(0, 40), at: Date.now() };
     }
     const set = sessionsByUser.get(session.userId);
     if (set) {
@@ -590,6 +677,7 @@ export function createLocalRunnerGateway(deps: {
               platform: auth.platform,
               runnerVersion: auth.runnerVersion,
               inFlight: new Set(),
+              health: null,
             };
             sessionsByDevice.set(session.deviceId, session);
             userSessions(session.userId).add(session);
@@ -625,6 +713,16 @@ export function createLocalRunnerGateway(deps: {
           sendPolicy(current);
           return;
         }
+        if (frame.type === "health") {
+          session.health = sanitizeHealth(frame);
+          const checkId = typeof frame.checkId === "string" ? frame.checkId : "";
+          const waiting = checkId ? checks.get(checkId) : undefined;
+          if (waiting && waiting.deviceId === session.deviceId) {
+            checks.delete(checkId);
+            waiting.resolve(session.health);
+          }
+          return;
+        }
         if (frame.type === "infer.chunk") {
           const id = typeof frame.id === "string" ? frame.id : "";
           const dataLine = typeof frame.data === "string" ? frame.data : "";
@@ -640,6 +738,13 @@ export function createLocalRunnerGateway(deps: {
           const id = typeof frame.id === "string" ? frame.id : "";
           const status = typeof frame.status === "number" ? frame.status : 200;
           session.inFlight.delete(id);
+          if (pending.has(id)) {
+            const st = statsFor(session.deviceId);
+            if (status < 400) {
+              st.answers += 1;
+              st.lastAnswerAt = Date.now();
+            } else st.lastFailure = { message: `Local model server answered HTTP ${status}`, at: Date.now() };
+          }
           completePending(id, status);
           return;
         }
@@ -648,6 +753,9 @@ export function createLocalRunnerGateway(deps: {
           const message =
             typeof frame.message === "string" ? frame.message : "Runner inference error";
           const retryable = Boolean(frame.retryable);
+          if (pending.has(id) && message !== "Cancelled") {
+            statsFor(session.deviceId).lastFailure = { message: shortText(message) ?? "error", at: Date.now() };
+          }
           session.inFlight.delete(id);
           failPending(id, message, retryable);
           return;
@@ -930,10 +1038,49 @@ export function createLocalRunnerGateway(deps: {
     },
     deviceInfo(deviceId: string): DeviceLiveInfo {
       const session = sessionsByDevice.get(deviceId);
+      const st = stats.get(deviceId);
+      const common = {
+        answers: st?.answers ?? 0,
+        lastAnswerAt: st?.lastAnswerAt ?? null,
+        lastFailure: st?.lastFailure ?? null,
+        lastDisconnect: st?.lastDisconnect ?? null,
+      };
       if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-        return { online: false, connectedAt: null, modelServer: null };
+        return { online: false, connectedAt: null, modelServer: null, ...common };
       }
-      return { online: true, connectedAt: session.connectedAt, modelServer: session.modelServer };
+      return {
+        online: true,
+        connectedAt: session.connectedAt,
+        modelServer: session.modelServer,
+        runnerVersion: session.runnerVersion || null,
+        health: session.health,
+        inFlight: session.inFlight.size,
+        ...common,
+      };
+    },
+    async checkDevice(deviceId: string): Promise<DeviceCheckResult> {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return { online: false };
+      if (!runnerSupportsHealth(session.runnerVersion)) {
+        return { online: true, supported: false, runnerVersion: session.runnerVersion };
+      }
+      const id = randomUUID();
+      const health = await new Promise<RunnerHealth | null>((resolve) => {
+        const timer = setTimeout(() => {
+          checks.delete(id);
+          resolve(null);
+        }, 8_000);
+        checks.set(id, { deviceId, resolve: (h) => { clearTimeout(timer); resolve(h); } });
+        try {
+          session.ws.send(JSON.stringify({ type: "health.check", id }));
+        } catch {
+          clearTimeout(timer);
+          checks.delete(id);
+          resolve(null);
+        }
+      });
+      if (!health) return { online: false };
+      return { online: true, supported: true, health };
     },
     async refreshDevice(deviceId: string) {
       const session = sessionsByDevice.get(deviceId);
