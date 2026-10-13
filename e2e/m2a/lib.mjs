@@ -41,9 +41,18 @@ export async function login(page, email) {
   const who = await loggedIn(page);
   if (who && who.email === email) return who;
   const since = sql(`select now() at time zone 'utc'`);
-  const res = await fetch(BASE + '/api/auth/sign-in/magic-link', { method: 'POST', headers: { 'content-type': 'application/json', origin: BASE },
-    body: JSON.stringify({ email, callbackURL: BASE + '/app' }) });
-  console.log('magic-link request', res.status);
+  // The browser profile (launch(profile)) keeps the session, so this only runs when it expired.
+  // The auth server rate-limits magic links (429): wait and retry instead of failing the run.
+  let res;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    res = await fetch(BASE + '/api/auth/sign-in/magic-link', { method: 'POST', headers: { 'content-type': 'application/json', origin: BASE },
+      body: JSON.stringify({ email, callbackURL: BASE + '/app' }) });
+    console.log('magic-link request', res.status);
+    if (res.status !== 429) break;
+    const wait = Math.min(60, Number(res.headers.get('retry-after')) || 15 * (attempt + 1));
+    console.log(`magic-link rate-limited, waiting ${wait}s`);
+    await sleep(wait * 1000);
+  }
   const token = sql(`select identifier from verification where value::text like '%"${q(email)}"%' and "createdAt" >= '${since}'::timestamp - interval '5 seconds' order by "createdAt" desc limit 1`);
   if (!token) throw new Error('no verification token for the test account');
   await page.goto(`${BASE}/api/auth/magic-link/verify?token=${token}&callbackURL=${encodeURIComponent(BASE + '/app')}`, { waitUntil: 'networkidle2' });

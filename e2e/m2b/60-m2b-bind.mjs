@@ -52,7 +52,7 @@ try {
   created.devId = devId;
   ok('newDeviceOnly', { isNew: !!devId && !devicesBefore.has(devId), othersKept: devicesBefore.size }, !!devId && !devicesBefore.has(devId));
   const online = await waitFor(async () => { const d = await api(page, '/api/local-runners/devices'); return d.body?.devices?.find((x) => x.id === devId && x.online && x.models.length) || null; }, 90000);
-  ok('runnerOnlineWithModels', { online: !!online, version: online?.runnerVersion, models: online?.models?.length }, !!online && /m2b/.test(online?.runnerVersion || ''));
+  ok('runnerOnlineWithModels', { online: !!online, version: online?.runnerVersion, models: online?.models?.length }, !!online && /^0\.2\.([2-9]|[1-9][0-9])|^0\.([3-9]|[1-9][0-9])\.|^[1-9]/.test(online?.runnerVersion || ''));
   const want = process.env.RK_M2B_MODEL || (online.models.find((m) => m.id === 'qwen2.5:3b') ? 'qwen2.5:3b' : online.models[0].id);
   // ---------- UI: Bots on my computer ----------
   const before = await api(page, '/api/local-runners/offered-models');

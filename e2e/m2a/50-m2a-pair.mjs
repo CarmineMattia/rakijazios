@@ -23,7 +23,17 @@ const waitFor = async (fn, ms, step = 1000) => { const end = Date.now() + ms; wh
 const q = s => s.replace(/'/g, "''");
 
 const qaId = sql(`select id from "user" where email='${QA_EMAIL.replace(/'/g, "''")}'`);
-sql(`delete from local_runner_devices where user_id='${qaId}'`); sql(`delete from local_runner_pairings where user_id='${qaId}'`);
+// Only touch what this run creates: remember what qa already has (other scripts' / tester's devices stay).
+const runStart = sql(`select now()::text`);
+const devicesBefore = new Set(sql(`select coalesce(string_agg(id, ','), '') from local_runner_devices where user_id='${qaId}'`).split(',').filter(Boolean));
+const pairingsBefore = new Set(sql(`select coalesce(string_agg(id, ','), '') from local_runner_pairings where user_id='${qaId}'`).split(',').filter(Boolean));
+const notBefore = (set) => (set.size ? `and id not in (${[...set].map((id) => `'${q(id)}'`).join(',')})` : '');
+let createdDevId = null;
+function cleanupOwn() {
+  if (createdDevId) sql(`delete from local_runner_devices where id='${q(createdDevId)}' and user_id='${qaId}'`);
+  sql(`delete from local_runner_devices where user_id='${qaId}' and paired_via='e2e' and id like 'e2edummy%'`);
+  sql(`delete from local_runner_pairings where user_id='${qaId}' and created_at >= '${runStart}'::timestamptz ${notBefore(pairingsBefore)}`);
+}
 
 const browser = await launch('qa-b1');
 const page = await browser.newPage();
@@ -72,8 +82,9 @@ const credA = readToken();
 ok('credFileMode', credA ? (fs.statSync(T + '/cfg/credentials.json').mode & 0o777).toString(8) : null);
 ok('credServer', credA?.server || null);
 ok('credGatewayViaWebOrigin', credA?.gatewayWsUrl || null);
-const dev = sql(`select id||'|'||status||'|'||enabled||'|'||coalesce(paired_via,'')||'|'||coalesce(platform,'')||'|'||coalesce(runner_version,'') from local_runner_devices where user_id='${qaId}'`);
-ok('deviceRow', dev.replace(/^[^|]+/, '<id>')); const devId = dev.split('|')[0];
+const dev = sql(`select id||'|'||status||'|'||enabled||'|'||coalesce(paired_via,'')||'|'||coalesce(platform,'')||'|'||coalesce(runner_version,'') from local_runner_devices where user_id='${qaId}' ${notBefore(devicesBefore)}`);
+ok('deviceRow', dev.replace(/^[^|]+/, '<id>')); const devId = dev.split('|')[0]; createdDevId = devId;
+ok('newDeviceOnly', { isNew: !!devId && !devicesBefore.has(devId), othersKept: devicesBefore.size }, !!devId && !devicesBefore.has(devId) && !dev.includes('\n'));
 ok('modelsAllOffInitially', sql(`select count(*) filter (where enabled)||'/'||count(*) from local_runner_models where device_id='${devId}'`));
 await page.click('[data-rk="hw-done"]'); await page.waitForSelector(`[data-rk-device="${devId}"]`, { timeout: 10000 }); await sleep(500);
 ok('listPill', await page.$eval(`[data-rk-device="${devId}"] [data-rk="hw-state"]`, n => n.textContent));
@@ -109,7 +120,8 @@ const cookieHdr = (await page.cookies()).map(c => `${c.name}=${c.value}`).join('
 ok('foreignOriginPost', await fetch(BASE + '/api/local-runners/pairings', { method: 'POST', headers: { 'content-type': 'application/json', cookie: cookieHdr, origin: 'https://evil.example' }, body: '{}' }).then(r => r.status));
 ok('anonDevices', await fetch(BASE + '/api/local-runners/devices').then(r => r.status));
 const qaList = (await api(page, '/api/local-runners/devices')).body;
-ok('qaSeesOnlyOwn', (qaList.devices || []).map(d => d.id === devId ? 'own' : 'OTHER'));
+const qaOwnIds = new Set(sql(`select coalesce(string_agg(id, ','), '') from local_runner_devices where user_id='${qaId}' and status='active'`).split(','));
+ok('qaSeesOnlyOwn', { hasNew: (qaList.devices || []).some(d => d.id === devId), foreign: (qaList.devices || []).filter(d => !qaOwnIds.has(d.id)).length });
 // second account
 const b2 = await launch('qa2-b2'); const p2page = await b2.newPage(); await login(p2page, QA2_EMAIL);
 const foreign = {};
@@ -121,13 +133,13 @@ ok('foreignAccount', foreign);
 ok('deviceUnchangedByForeign', sql(`select name||'|'||enabled||'|'||status from local_runner_devices where id='${devId}'`));
 await b2.close();
 // max 10 (dummy active rows, removed right after)
-sql(`insert into local_runner_devices (id,user_id,name,token_hash,status,paired_via) select 'e2edummy'||g,'${qaId}','dummy '||g,'e2edummy-'||g||'-'||md5(random()::text),'active','e2e' from generate_series(1,9) g`);
+sql(`insert into local_runner_devices (id,user_id,name,token_hash,status,paired_via) select 'e2edummy'||g,'${qaId}','dummy '||g,'e2edummy-'||g||'-'||md5(random()::text),'active','e2e' from generate_series(1, greatest(0, 10 - (select count(*) from local_runner_devices where user_id='${qaId}' and status='active'))::int) g`);
 const over = await api(page, '/api/local-runners/pairings', { method: 'POST', body: JSON.stringify({ os: 'linux' }) });
 ok('max10', { status: over.status, error: over.body?.error });
 await page.reload({ waitUntil: 'networkidle2' }); await openHardware(); await sleep(1500);
 ok('addDisabledAtMax', await page.$eval('[data-rk="hw-add"]', b => b.disabled));
 await shot(page, 'm2a-06-max');
-sql(`delete from local_runner_devices where user_id='${qaId}' and paired_via='e2e'`);
+sql(`delete from local_runner_devices where user_id='${qaId}' and paired_via='e2e' and id like 'e2edummy%'`);
 await page.reload({ waitUntil: 'networkidle2' }); await openHardware(); await page.waitForSelector(`[data-rk-device="${devId}"]`, { timeout: 15000 });
 
 // ---------- B: rotate (New key) -> old runner exits; re-run with portable Node + systemd autostart ----------
@@ -148,7 +160,7 @@ ok('installB_systemd', /systemd user service/.test(fs.readFileSync(T + '/install
 const connectedB = await waitFor(async () => (await statusText()).includes('is connected'), 60000);
 ok('uiConnectedB', !!connectedB); await shot(page, 'm2a-08-reconnected');
 readToken();
-ok('sameDeviceAfterRotate', sql(`select count(*)||'|'||string_agg(id,',') from local_runner_devices where user_id='${qaId}'`) === `1|${devId}`);
+ok('sameDeviceAfterRotate', sql(`select count(*)||'|'||string_agg(id,',') from local_runner_devices where user_id='${qaId}' ${notBefore(devicesBefore)}`) === `1|${devId}`);
 ok('modelSwitchKept', sql(`select enabled from local_runner_models where device_id='${devId}' and model_id='${q(firstModel)}'`));
 ok('serviceActive', spawnSync('systemctl', ['--user', 'is-active', SVC], { encoding: 'utf8' }).stdout.trim());
 
@@ -192,5 +204,10 @@ fs.rmSync(`${REAL_CFG}/systemd/user/${SVC}.service`, { force: true });
 spawnSync('systemctl', ['--user', 'daemon-reload']);
 for (const pid of runnerPids()) { try { process.kill(Number(pid)); } catch {} }
 fs.rmSync(T, { recursive: true, force: true });
-sql(`delete from local_runner_pairings where user_id='${qaId}'`); sql(`delete from local_runner_devices where user_id='${qaId}'`);
+cleanupOwn();
+const left = new Set(sql(`select coalesce(string_agg(id, ','), '') from local_runner_devices where user_id='${qaId}'`).split(',').filter(Boolean));
+const untouched = [...devicesBefore].every((id) => left.has(id)) && !left.has(devId);
+console.log('otherDevicesUntouched', untouched ? 'PASS' : 'FAIL', { before: devicesBefore.size, oursGone: !left.has(devId) });
+results.otherDevicesUntouched = { before: devicesBefore.size, oursGone: !left.has(devId), pass: untouched };
+fs.writeFileSync(join(OUT, '50-m2a-results.json'), JSON.stringify(results, null, 2));
 console.log('DONE');

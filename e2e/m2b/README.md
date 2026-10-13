@@ -27,3 +27,9 @@ This script uses the same accounts and throwaway runner as `60`. It checks:
 - 0 secrets in the logs.
 
 At the end it removes the grant, the binding and the computer.
+
+## 62-health.mjs (runner health)
+
+Pairs a throwaway 0.2.3 runner for qa, checks the health report, `POST /devices/:id/check` (API + "Check now" in the UI), 404 for qa2, and "Not reachable" after the runner is stopped. Removes only its own computer and pairing.
+
+Note: `e2e/m2a/50-m2a-pair.mjs` now also removes only what it created (it used to delete every qa computer), and `lib.mjs` `login()` waits and retries when the magic-link endpoint answers 429 (the per-script browser profile already reuses the session).

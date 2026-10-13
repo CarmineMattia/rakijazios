@@ -203,6 +203,35 @@
     listTimer = setTimeout(refresh, 10_000);
   }
 
+  // Last "Check now" result per computer (kept across the 10 s list refresh).
+  const checkResults = new Map();
+
+  function healthText(d) {
+    const h = d.health || {};
+    const r = h.report;
+    const parts = [];
+    if (d.online && r) {
+      parts.push(r.modelServerOk ? `Model server OK (${r.models} model${r.models === 1 ? "" : "s"})` : "Model server not answering on that computer");
+    }
+    if (h.inFlight) parts.push(`${h.inFlight} answering now`);
+    if (h.lastAnswerAt) parts.push(`last answer ${ago(h.lastAnswerAt)}`);
+    if (h.lastFailure) parts.push(`last problem ${ago(h.lastFailure.at)}: ${h.lastFailure.message}`);
+    else if (r && r.lastError) parts.push(`last problem ${ago(new Date(r.lastErrorAt).toISOString())}: ${r.lastError}`);
+    if (!d.online && h.lastDisconnect) parts.push(`disconnected ${ago(h.lastDisconnect.at)} (${h.lastDisconnect.reason})`);
+    return parts.join(" · ");
+  }
+
+  function checkText(res) {
+    if (!res) return "";
+    if (res.error) return `Check failed: ${res.error}`;
+    if (!res.online) return "Not reachable: the runner on that computer isn't connected. Check that it is on and running.";
+    if (!res.supported) return `This runner (${res.runnerVersion || "old"}) can't run checks. Update it to ${res.latestRunnerVersion} to use Check now.`;
+    const h = res.health;
+    return h.modelServerOk
+      ? `All good: model server answered in ${h.latencyMs ?? "?"} ms with ${h.models} model${h.models === 1 ? "" : "s"}.`
+      : "Runner connected, but no model server is answering on that computer. Start Ollama, LM Studio or llama.cpp there.";
+  }
+
   function deviceCard(d) {
     const card = el("div", "", { className: "rk-hw-card", data: { "rk-device": d.id } });
     const row = el("div", "", { className: "rk-hw-row" });
@@ -223,6 +252,19 @@
       d.online ? `model server: ${d.modelServer && d.modelServer !== "none" ? d.modelServer : "none found"}` : null,
     ].filter(Boolean);
     card.append(el("div", meta.join(" · "), { className: "rk-hw-meta" }));
+    const health = healthText(d);
+    if (health) card.append(el("div", health, { className: "rk-hw-meta", data: { rk: "hw-health" } }));
+    if (d.updateAvailable) {
+      card.append(
+        el(
+          "p",
+          `Update available: runner ${d.latestRunnerVersion}. Press "New key" and run the new command on that computer; it updates the runner and keeps this computer and its settings.`,
+          { className: "rk-hw-hint", data: { rk: "hw-update" } },
+        ),
+      );
+    }
+    const checkLine = el("div", checkText(checkResults.get(d.id)), { className: "rk-hw-hint", data: { rk: "hw-check-result" } });
+    card.append(checkLine);
     rename.addEventListener("click", () => {
       const input = el("input", "", { type: "text", value: d.name, maxLength: 64 });
       const save = el("button", "Save", { type: "button" });
@@ -314,7 +356,21 @@
       }
       renderList();
     });
-    actions.append(pause, rotate, remove);
+    const check = el("button", "Check now", { type: "button", data: { rk: "hw-check" } });
+    check.addEventListener("click", async () => {
+      check.disabled = true;
+      checkLine.textContent = "Checking…";
+      let res;
+      try {
+        res = await api(`/devices/${encodeURIComponent(d.id)}/check`, {});
+      } catch (e) {
+        res = { error: e.message };
+      }
+      checkResults.set(d.id, res);
+      checkLine.textContent = checkText(res);
+      check.disabled = false;
+    });
+    actions.append(check, pause, rotate, remove);
     card.append(actions);
     return card;
   }
