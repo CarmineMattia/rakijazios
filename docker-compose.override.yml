@@ -18,6 +18,8 @@ services:
       # Rakijazios M1 shared-local: worker -> api gateway -> owner runner.
       RAKAZO_SHARED_LOCAL_GATEWAY_URL: http://api:3100/api/local-runners/v1
       RAKAZO_SHARED_LOCAL_MODELS: gemma4:26b-a4b-it-q4_K_M
+      # Rakijazios M2a: Settings → My hardware, pairing codes and runner installers.
+      RAKAZO_LOCAL_RUNNERS_UI: "1"
     volumes:
       - ./patches/api/model-selection.ts:/app/packages/adapters/src/model-selection.ts:ro,z
       - ./patches/api/executor.ts:/app/packages/adapters/src/executor.ts:ro,z
@@ -37,6 +39,11 @@ services:
       - ./patches/auth/index.ts:/app/packages/auth/src/index.ts:ro,z
       - ./patches/api/index.ts:/app/apps/api/src/index.ts:ro,z
       - ./patches/api/local-runners.ts:/app/apps/api/src/local-runners.ts:ro,z
+      - ./patches/api/local-runner-control.ts:/app/apps/api/src/local-runner-control.ts:ro,z
+      - ./patches/api/local-runner-pairing.ts:/app/apps/api/src/local-runner-pairing.ts:ro,z
+      - ./patches/api/local-runner-install.ts:/app/apps/api/src/local-runner-install.ts:ro,z
+      # Runner files served (pinned, checksummed) by the installers.
+      - ./runner:/app/apps/api/local-runner-bundle:ro,z
       - ./patches/api/rpc-errors.ts:/app/apps/api/src/rpc-errors.ts:ro,z
       - ./patches/api/group-message-summary.ts:/app/apps/api/src/group-message-summary.ts:ro,z
       - ./patches/api/local-runner-seed.ts:/app/apps/api/src/local-runner-seed.ts:ro,z
@@ -64,6 +71,8 @@ services:
   web:
     volumes:
       - ./patches/web/dist:/app/apps/web/dist:ro,z
+      # Rakijazios M2a: proxy the runner WebSocket through the web origin.
+      - ./patches/web/vite.config.ts:/app/apps/web/vite.config.ts:ro,z
   supervisor:
     security_opt:
       - label:disable

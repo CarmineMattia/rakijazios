@@ -1,21 +1,33 @@
 /**
- * Local-runner gateway (M1): WebSocket session manager + OpenAI-compatible
- * HTTP proxy that forwards chat completions to the owner's connected runner.
+ * Local-runner gateway: WebSocket session manager + OpenAI-compatible HTTP proxy
+ * that forwards chat completions to the owner's connected runner.
+ *
+ * M1: one runner per owner, seeded by CLI.
+ * M2a: several computers per owner (one live session per device), advertised
+ * models stored in local_runner_models with an owner on/off switch, a per-device
+ * pause switch, `policy` pushed on every change and `bye` on revoke/rotate.
  */
 import { readdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { PrismaClient } from "@rakazo/db";
 import type { Hono } from "hono";
 import {
   hashDeviceToken,
+  sharedLocalModelIds,
   verifySharedLocalToken,
 } from "./shared-local-token.js";
+import {
+  MAX_MODELS_PER_DEVICE,
+  sanitizeAdvertisedModels,
+  sanitizeShort,
+  type AdvertisedModel,
+} from "./local-runner-pairing.js";
 
 type WsModule = {
-  WebSocketServer: new (opts: { noServer: boolean }) => {
+  WebSocketServer: new (opts: { noServer: boolean; maxPayload?: number }) => {
     handleUpgrade: (
       req: IncomingMessage,
       socket: Duplex,
@@ -62,7 +74,14 @@ type DeviceRow = {
   name: string;
   token_hash: string;
   status: string;
+  enabled: boolean;
+  paired_via: string | null;
 };
+
+/** Frames from runners are small (SSE lines); hello/models lists are bounded too. */
+const MAX_FRAME_BYTES = 1024 * 1024;
+const FAILED_HELLO_LIMIT = 20;
+const FAILED_HELLO_WINDOW_MS = 60_000;
 
 type PendingInfer = {
   id: string;
@@ -80,8 +99,23 @@ type RunnerSession = {
   userId: string;
   ws: WsSocket;
   lastSeenAt: number;
+  connectedAt: number;
+  /** What the runner advertises right now. */
   offeredModels: string[];
+  /** Advertised AND switched on by the owner. */
+  allowedModels: Set<string>;
+  /** Owner's pause switch (false = paused). */
+  enabled: boolean;
+  modelServer: string | null;
+  platform: string | null;
+  runnerVersion: string;
   inFlight: Set<string>;
+};
+
+export type DeviceLiveInfo = {
+  online: boolean;
+  connectedAt: number | null;
+  modelServer: string | null;
 };
 
 const ready = new WeakMap<PrismaClient, Promise<void>>();
@@ -104,6 +138,42 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
       await prisma.$executeRawUnsafe(
         `CREATE INDEX IF NOT EXISTS local_runner_devices_user_id_idx ON local_runner_devices (user_id)`,
       );
+      // M2a (additive): pause switch, platform, lifecycle timestamps, how it was paired
+      // (NULL/'seed' = M1 operator seed, 'pairing' = pairing code from the UI).
+      for (const column of [
+        "enabled BOOLEAN NOT NULL DEFAULT true",
+        "platform TEXT",
+        "revoked_at TIMESTAMPTZ",
+        "rotated_at TIMESTAMPTZ",
+        "paired_via TEXT",
+      ]) {
+        await prisma.$executeRawUnsafe(`ALTER TABLE local_runner_devices ADD COLUMN IF NOT EXISTS ${column}`);
+      }
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_pairings (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL UNIQUE,
+        device_id TEXT REFERENCES local_runner_devices(id) ON DELETE CASCADE,
+        result_device_id TEXT REFERENCES local_runner_devices(id) ON DELETE SET NULL,
+        os TEXT,
+        expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ,
+        cancelled_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      await prisma.$executeRawUnsafe(
+        `CREATE INDEX IF NOT EXISTS local_runner_pairings_user_idx ON local_runner_pairings (user_id, created_at)`,
+      );
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_models (
+        device_id TEXT NOT NULL REFERENCES local_runner_devices(id) ON DELETE CASCADE,
+        model_id TEXT NOT NULL,
+        context_window INTEGER,
+        advertised BOOLEAN NOT NULL DEFAULT true,
+        enabled BOOLEAN NOT NULL DEFAULT false,
+        last_advertised_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (device_id, model_id)
+      )`);
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -123,12 +193,13 @@ export async function seedLocalRunnerDevice(
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashDeviceToken(token);
   await prisma.$executeRawUnsafe(
-    `INSERT INTO local_runner_devices (id, user_id, name, token_hash, status, updated_at)
-     VALUES ($1, $2, $3, $4, 'active', NOW())
+    `INSERT INTO local_runner_devices (id, user_id, name, token_hash, status, paired_via, updated_at)
+     VALUES ($1, $2, $3, $4, 'active', 'seed', NOW())
      ON CONFLICT (id) DO UPDATE SET
        token_hash = EXCLUDED.token_hash,
        name = EXCLUDED.name,
        status = 'active',
+       revoked_at = NULL,
        updated_at = NOW()`,
     deviceId,
     input.userId,
@@ -143,34 +214,122 @@ export type LocalRunnerGateway = {
   attachUpgrade: (server: HttpServer) => void;
   /** Test/ops helper */
   isOwnerOnline: (userId: string) => boolean;
+  /** M2a: live state of one computer (for Settings → My hardware). */
+  deviceInfo: (deviceId: string) => DeviceLiveInfo;
+  /** M2a: reload pause switch + enabled models from the DB and push `policy`. */
+  refreshDevice: (deviceId: string) => Promise<void>;
+  /** M2a: send `bye{reason}` and drop the live session (revoke / rotate / re-pair). */
+  disconnectDevice: (deviceId: string, reason: string) => void;
 };
+
+/**
+ * Store what a runner advertises. New rows start switched OFF, except for M1-era
+ * devices (seeded by the operator CLI), where the operator's
+ * RAKAZO_SHARED_LOCAL_MODELS list stays on so existing bots keep working.
+ * Returns the models that are advertised AND enabled.
+ */
+export async function syncAdvertisedModels(
+  prisma: PrismaClient,
+  device: { id: string; paired_via: string | null },
+  models: AdvertisedModel[],
+): Promise<string[]> {
+  const legacy = device.paired_via !== "pairing";
+  const legacyOn = legacy ? sharedLocalModelIds() : [];
+  const list = models.slice(0, MAX_MODELS_PER_DEVICE);
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO local_runner_models (device_id, model_id, context_window, advertised, enabled, last_advertised_at)
+     SELECT $1, m.id, m.ctx, true, m.id IN (SELECT jsonb_array_elements_text($3::jsonb)), NOW()
+     FROM jsonb_to_recordset($2::jsonb) AS m(id text, ctx int)
+     ON CONFLICT (device_id, model_id) DO UPDATE SET
+       advertised = true,
+       context_window = COALESCE(EXCLUDED.context_window, local_runner_models.context_window),
+       last_advertised_at = NOW()`,
+    device.id,
+    JSON.stringify(list.map((m) => ({ id: m.id, ctx: m.contextWindow }))),
+    JSON.stringify(legacyOn),
+  );
+  await prisma.$executeRawUnsafe(
+    `UPDATE local_runner_models SET advertised = false
+     WHERE device_id = $1 AND advertised AND model_id NOT IN (SELECT jsonb_array_elements_text($2::jsonb))`,
+    device.id,
+    JSON.stringify(list.map((m) => m.id)),
+  );
+  // Forget models that are gone and were never switched on.
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM local_runner_models WHERE device_id = $1 AND NOT advertised AND NOT enabled`,
+    device.id,
+  );
+  return loadAllowedModels(prisma, device.id);
+}
+
+async function loadAllowedModels(prisma: PrismaClient, deviceId: string): Promise<string[]> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ model_id: string }>>(
+    `SELECT model_id FROM local_runner_models WHERE device_id = $1 AND advertised AND enabled ORDER BY model_id`,
+    deviceId,
+  );
+  return rows.map((r) => r.model_id);
+}
+
+function hashesEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 export function createLocalRunnerGateway(deps: {
   prisma: PrismaClient;
 }): LocalRunnerGateway {
   const sessionsByDevice = new Map<string, RunnerSession>();
-  const sessionsByUser = new Map<string, RunnerSession>();
+  const sessionsByUser = new Map<string, Set<RunnerSession>>();
   const pending = new Map<string, PendingInfer>();
+  const failedHellos = new Map<string, { count: number; resetAt: number }>();
   const wsMod = loadWs();
-  const wss = new wsMod.WebSocketServer({ noServer: true });
+  const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
+
+  function userSessions(userId: string): Set<RunnerSession> {
+    let set = sessionsByUser.get(userId);
+    if (!set) {
+      set = new Set();
+      sessionsByUser.set(userId, set);
+    }
+    return set;
+  }
+
+  function sendPolicy(session: RunnerSession): void {
+    try {
+      session.ws.send(
+        JSON.stringify({
+          type: "policy",
+          maxInFlight: MAX_IN_FLIGHT,
+          hardTimeoutMs: HARD_TIMEOUT_MS,
+          enabled: session.enabled,
+          allowedModels: [...session.allowedModels],
+        }),
+      );
+    } catch {
+      /* socket closing */
+    }
+  }
 
   function touch(session: RunnerSession): void {
     session.lastSeenAt = Date.now();
   }
 
-  function dropSession(session: RunnerSession, reason: string): void {
+  function dropSession(session: RunnerSession, reason: string, closeCode = 1000): void {
     if (sessionsByDevice.get(session.deviceId) === session) {
       sessionsByDevice.delete(session.deviceId);
     }
-    if (sessionsByUser.get(session.userId) === session) {
-      sessionsByUser.delete(session.userId);
+    const set = sessionsByUser.get(session.userId);
+    if (set) {
+      set.delete(session);
+      if (!set.size) sessionsByUser.delete(session.userId);
     }
     for (const id of [...session.inFlight]) {
       failPending(id, `Runner disconnected (${reason})`, true);
     }
     session.inFlight.clear();
     try {
-      session.ws.close(1000, reason.slice(0, 64));
+      session.ws.close(closeCode, reason.slice(0, 64));
     } catch {
       /* ignore */
     }
@@ -209,35 +368,56 @@ export function createLocalRunnerGateway(deps: {
     }
   }
 
-  async function authenticateHello(
-    frame: Record<string, unknown>,
-  ): Promise<{ device: DeviceRow; offeredModels: string[]; runnerVersion: string } | null> {
-    const deviceId = typeof frame.deviceId === "string" ? frame.deviceId : "";
-    const token = typeof frame.token === "string" ? frame.token : "";
+  async function authenticateHello(frame: Record<string, unknown>): Promise<{
+    device: DeviceRow;
+    models: AdvertisedModel[];
+    allowedModels: string[];
+    runnerVersion: string;
+    platform: string | null;
+    modelServer: string | null;
+  } | null> {
+    const deviceId = typeof frame.deviceId === "string" ? frame.deviceId.slice(0, 64) : "";
+    const token = typeof frame.token === "string" ? frame.token.slice(0, 256) : "";
     if (!deviceId || !token) return null;
     await ensureLocalRunnerTables(deps.prisma);
     const rows = await deps.prisma.$queryRawUnsafe<DeviceRow[]>(
-      `SELECT id, user_id, name, token_hash, status FROM local_runner_devices WHERE id = $1`,
+      `SELECT id, user_id, name, token_hash, status, enabled, paired_via FROM local_runner_devices WHERE id = $1`,
       deviceId,
     );
     const device = rows[0];
     if (!device || device.status !== "active") return null;
-    const hash = hashDeviceToken(token);
-    if (hash !== device.token_hash) return null;
-    const offeredModels = Array.isArray(frame.offeredModels)
-      ? frame.offeredModels.filter((m): m is string => typeof m === "string")
-      : [];
-    const runnerVersion =
-      typeof frame.runnerVersion === "string" ? frame.runnerVersion.slice(0, 64) : "";
+    if (!hashesEqual(hashDeviceToken(token), device.token_hash)) return null;
+    const models = sanitizeAdvertisedModels(frame.offeredModels);
+    const runnerVersion = sanitizeShort(frame.runnerVersion) ?? "";
+    const platform = sanitizeShort(frame.platform, 40);
+    const modelServer = sanitizeShort(frame.modelServer, 40);
     await deps.prisma.$executeRawUnsafe(
-      `UPDATE local_runner_devices SET last_seen_at = NOW(), runner_version = $2, updated_at = NOW() WHERE id = $1`,
+      `UPDATE local_runner_devices SET last_seen_at = NOW(), runner_version = $2,
+         platform = COALESCE($3, platform), updated_at = NOW() WHERE id = $1`,
       deviceId,
       runnerVersion || null,
+      platform,
     );
-    return { device, offeredModels, runnerVersion };
+    const allowedModels = await syncAdvertisedModels(deps.prisma, device, models);
+    return { device, models, allowedModels, runnerVersion, platform, modelServer };
   }
 
-  function bindSocket(ws: WsSocket): void {
+  function helloBlocked(ip: string): boolean {
+    const h = failedHellos.get(ip);
+    return Boolean(h && h.resetAt > Date.now() && h.count >= FAILED_HELLO_LIMIT);
+  }
+
+  function helloFailed(ip: string): void {
+    const now = Date.now();
+    const h = failedHellos.get(ip);
+    if (!h || h.resetAt <= now) failedHellos.set(ip, { count: 1, resetAt: now + FAILED_HELLO_WINDOW_MS });
+    else h.count += 1;
+    if (failedHellos.size > 10_000) {
+      for (const [k, v] of failedHellos) if (v.resetAt <= now) failedHellos.delete(k);
+    }
+  }
+
+  function bindSocket(ws: WsSocket, ip: string): void {
     let session: RunnerSession | null = null;
     let helloTimer = setTimeout(() => {
       try {
@@ -247,46 +427,67 @@ export function createLocalRunnerGateway(deps: {
       }
     }, 15_000);
 
+    // Frames that arrive while the hello is still being checked (the runner sends
+    // its models right after hello) wait for that check instead of failing it.
+    let authenticating: Promise<void> | null = null;
+
     ws.on("message", (data: unknown) => {
       void (async () => {
         const raw = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
         const frame = parseFrame(raw);
         if (!frame) return;
 
+        if (!session && authenticating && frame.type !== "hello") {
+          await authenticating;
+          if (!session) return;
+        }
         if (!session) {
           if (frame.type !== "hello") {
             ws.close(1008, "hello required");
             return;
           }
+          if (authenticating) return; // one hello per socket
           clearTimeout(helloTimer);
-          const auth = await authenticateHello(frame);
-          if (!auth) {
-            ws.close(1008, "unauthorized");
+          // Keyed by address *and* claimed device, so one misconfigured or revoked
+          // runner behind the shared web proxy cannot lock out everyone else.
+          const limiterKey = `${ip}|${typeof frame.deviceId === "string" ? frame.deviceId.slice(0, 64) : "-"}`;
+          if (helloBlocked(limiterKey)) {
+            ws.close(1008, "too many attempts");
             return;
           }
-          const existing = sessionsByDevice.get(auth.device.id);
-          if (existing) dropSession(existing, "replaced");
-          const existingUser = sessionsByUser.get(auth.device.user_id);
-          if (existingUser && existingUser.deviceId !== auth.device.id) {
-            dropSession(existingUser, "replaced-by-user");
+          let done!: () => void;
+          authenticating = new Promise<void>((resolve) => (done = resolve));
+          try {
+            const auth = await authenticateHello(frame).catch(() => null);
+            if (!auth) {
+              helloFailed(limiterKey);
+              ws.close(1008, "unauthorized");
+              return;
+            }
+            if (ws.readyState !== 1) return; // closed while we were checking
+            // One live session per computer; other computers of the same owner stay.
+            const existing = sessionsByDevice.get(auth.device.id);
+            if (existing) dropSession(existing, "replaced");
+            session = {
+              deviceId: auth.device.id,
+              userId: auth.device.user_id,
+              ws,
+              lastSeenAt: Date.now(),
+              connectedAt: Date.now(),
+              offeredModels: auth.models.map((m) => m.id),
+              allowedModels: new Set(auth.allowedModels),
+              enabled: auth.device.enabled !== false,
+              modelServer: auth.modelServer,
+              platform: auth.platform,
+              runnerVersion: auth.runnerVersion,
+              inFlight: new Set(),
+            };
+            sessionsByDevice.set(session.deviceId, session);
+            userSessions(session.userId).add(session);
+            sendPolicy(session);
+          } finally {
+            done();
           }
-          session = {
-            deviceId: auth.device.id,
-            userId: auth.device.user_id,
-            ws,
-            lastSeenAt: Date.now(),
-            offeredModels: auth.offeredModels,
-            inFlight: new Set(),
-          };
-          sessionsByDevice.set(session.deviceId, session);
-          sessionsByUser.set(session.userId, session);
-          ws.send(
-            JSON.stringify({
-              type: "policy",
-              maxInFlight: MAX_IN_FLIGHT,
-              hardTimeoutMs: HARD_TIMEOUT_MS,
-            }),
-          );
           return;
         }
 
@@ -296,11 +497,23 @@ export function createLocalRunnerGateway(deps: {
           return;
         }
         if (frame.type === "models" && Array.isArray(frame.models)) {
-          session.offeredModels = frame.models
-            .map((m) => (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string"
-              ? (m as { id: string }).id
-              : null))
-            .filter((id): id is string => Boolean(id));
+          const current = session;
+          const models = sanitizeAdvertisedModels(frame.models);
+          current.offeredModels = models.map((m) => m.id);
+          const server = sanitizeShort(frame.modelServer, 40);
+          if (server) current.modelServer = server;
+          const rows = await deps.prisma.$queryRawUnsafe<DeviceRow[]>(
+            `SELECT id, user_id, name, token_hash, status, enabled, paired_via FROM local_runner_devices WHERE id = $1`,
+            current.deviceId,
+          );
+          const device = rows[0];
+          if (!device || device.status !== "active") {
+            dropSession(current, "revoked");
+            return;
+          }
+          current.allowedModels = new Set(await syncAdvertisedModels(deps.prisma, device, models));
+          current.enabled = device.enabled !== false;
+          sendPolicy(current);
           return;
         }
         if (frame.type === "infer.chunk") {
@@ -348,14 +561,41 @@ export function createLocalRunnerGateway(deps: {
     }
   }, 5_000).unref?.();
 
-  function findSessionForOwner(ownerUserId: string): RunnerSession | undefined {
-    const session = sessionsByUser.get(ownerUserId);
-    if (!session) return undefined;
-    if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-      dropSession(session, "stale");
-      return undefined;
+  /** Live, non-stale, not paused sessions of an owner. */
+  function ownerSessions(ownerUserId: string): RunnerSession[] {
+    const out: RunnerSession[] = [];
+    for (const session of [...(sessionsByUser.get(ownerUserId) ?? [])]) {
+      if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
+        dropSession(session, "stale");
+        continue;
+      }
+      if (session.enabled) out.push(session);
     }
-    return session;
+    return out;
+  }
+
+  /** Models an owner can use right now: advertised and switched on, on any live computer. */
+  function ownerModels(ownerUserId: string): string[] {
+    const ids = new Set<string>();
+    for (const session of ownerSessions(ownerUserId)) {
+      for (const id of session.offeredModels) if (session.allowedModels.has(id)) ids.add(id);
+    }
+    return [...ids].sort();
+  }
+
+  /**
+   * Pick a computer for this model (M2a, until M2b binds bots to one computer):
+   * the least busy live session that offers it. `busy` = offered but all full.
+   */
+  function pickSession(ownerUserId: string, model: string): RunnerSession | "busy" | undefined {
+    const offering = ownerSessions(ownerUserId).filter(
+      (s) => s.allowedModels.has(model) && s.offeredModels.includes(model),
+    );
+    if (!offering.length) return undefined;
+    const free = offering
+      .filter((s) => s.inFlight.size < MAX_IN_FLIGHT)
+      .sort((a, b) => a.inFlight.size - b.inFlight.size);
+    return free[0] ?? "busy";
   }
 
   async function proxyChatCompletions(
@@ -363,14 +603,18 @@ export function createLocalRunnerGateway(deps: {
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
-    const session = findSessionForOwner(ownerUserId);
-    if (!session) {
+    const model = typeof body.model === "string" ? body.model : "";
+    if (!model) {
+      return Response.json({ error: { message: "model is required" } }, { status: 400 });
+    }
+    const picked = pickSession(ownerUserId, model);
+    if (!picked) {
       return Response.json(
         { error: { message: OFFLINE_MESSAGE, type: "shared_local_offline" } },
         { status: 503 },
       );
     }
-    if (session.inFlight.size >= MAX_IN_FLIGHT) {
+    if (picked === "busy") {
       return Response.json(
         {
           error: {
@@ -381,11 +625,7 @@ export function createLocalRunnerGateway(deps: {
         { status: 429 },
       );
     }
-
-    const model = typeof body.model === "string" ? body.model : "";
-    if (!model) {
-      return Response.json({ error: { message: "model is required" } }, { status: 400 });
-    }
+    const session = picked;
 
     const id = randomUUID();
     const p: PendingInfer = {
@@ -509,7 +749,51 @@ export function createLocalRunnerGateway(deps: {
 
   return {
     isOwnerOnline(userId: string) {
-      return Boolean(findSessionForOwner(userId));
+      return ownerSessions(userId).length > 0;
+    },
+    deviceInfo(deviceId: string): DeviceLiveInfo {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
+        return { online: false, connectedAt: null, modelServer: null };
+      }
+      return { online: true, connectedAt: session.connectedAt, modelServer: session.modelServer };
+    },
+    async refreshDevice(deviceId: string) {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session) return;
+      const rows = await deps.prisma.$queryRawUnsafe<Array<{ enabled: boolean; status: string }>>(
+        `SELECT enabled, status FROM local_runner_devices WHERE id = $1`,
+        deviceId,
+      );
+      if (!rows[0] || rows[0].status !== "active") {
+        this.disconnectDevice(deviceId, "revoked");
+        return;
+      }
+      session.enabled = rows[0].enabled !== false;
+      session.allowedModels = new Set(await loadAllowedModels(deps.prisma, deviceId));
+      if (!session.enabled) {
+        // Pausing stops answers in progress too.
+        for (const id of [...session.inFlight]) {
+          try {
+            session.ws.send(JSON.stringify({ type: "infer.cancel", id }));
+          } catch {
+            /* ignore */
+          }
+          failPending(id, OFFLINE_MESSAGE, false);
+        }
+        session.inFlight.clear();
+      }
+      sendPolicy(session);
+    },
+    disconnectDevice(deviceId: string, reason: string) {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session) return;
+      try {
+        session.ws.send(JSON.stringify({ type: "bye", reason }));
+      } catch {
+        /* ignore */
+      }
+      dropSession(session, reason, 4001);
     },
     mountHttp(app: Hono) {
       app.get("/api/local-runners/v1/models", async (c) => {
@@ -517,13 +801,12 @@ export function createLocalRunnerGateway(deps: {
         const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
         const verified = token ? verifySharedLocalToken(token) : null;
         if (!verified) return c.json({ error: "Unauthorized" }, 401);
-        const session = findSessionForOwner(verified.ownerUserId);
-        if (!session) {
+        if (!ownerSessions(verified.ownerUserId).length) {
           return c.json({ error: { message: OFFLINE_MESSAGE } }, 503);
         }
         return c.json({
           object: "list",
-          data: session.offeredModels.map((id) => ({
+          data: ownerModels(verified.ownerUserId).map((id) => ({
             id,
             object: "model",
             owned_by: "shared-local",
@@ -550,8 +833,13 @@ export function createLocalRunnerGateway(deps: {
         const host = req.headers.host ?? "127.0.0.1";
         const url = new URL(req.url ?? "/", `http://${host}`);
         if (url.pathname !== "/api/local-runners/ws") return;
+        // Behind the web proxy every runner shares the proxy's address; the
+        // limiter then acts as a global cap on failed hellos, which is fine.
+        // The web proxy appends the real client address last; earlier entries are client-supplied.
+        const forwarded = String(req.headers["x-forwarded-for"] ?? "").split(",").pop()?.trim();
+        const ip = forwarded || req.socket.remoteAddress || "unknown";
         wss.handleUpgrade(req, socket, head, (ws) => {
-          bindSocket(ws);
+          bindSocket(ws, ip);
         });
       });
     },

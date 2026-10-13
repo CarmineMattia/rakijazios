@@ -1,6 +1,6 @@
-# Rakazo Online
+# Rakijazios
 
-Rakazo Online is our self-hosted, customized **Rakazo** running on Host-002. The goal is a more
+Rakijazios is our self-hosted, customized **Rakazo** running on Host-001. The goal is a more
 **social** product: people find each other by `@handle` or email, have profile pictures, join
 shared conversations with humans and bots, and invite others with a share link.
 
@@ -128,33 +128,60 @@ Web UI on `:5173`, API on `:3100`. Services: web, api, worker, supervisor, postg
   `group-sharing.ts` and `thread-target.ts`).
 - **Dist overlays.** The whole patched web `dist` is one read-only mount. Instead of rebuilding the
   minified bundle, `patches/web/dist/index.html` loads plain-JS overlays with `<script defer>`:
-  `magic-auth`, `invite`, `social`, `group-sharing`, `ui-tweaks` and `account-avatar`.
+  `magic-auth`, `invite`, `social`, `group-sharing`, `ui-tweaks`, `account-avatar` and
+  `local-hardware` (Settings → My hardware, shown only when the api has `RAKAZO_LOCAL_RUNNERS_UI=1`).
+- **Web proxy config.** `patches/web/vite.config.ts` replaces the image's `vite.config.ts` and adds
+  one change: the `/api/local-runners` proxy, with WebSocket upgrade and `X-Forwarded-For`. Runners
+  then connect through the web origin, so no extra port is opened.
+- **Runner bundle.** The repo `runner/` directory is mounted read-only into the api
+  (`/app/apps/api/local-runner-bundle`). The installers serve exactly those files, pinned with
+  SHA-256. On the live stack, copy `runner/package.json` and `runner/src/*.ts` to
+  `<live>/runner/` next to `patches/`.
   (`computer-settings-overlay.js` and `bot-time-prefs.js` are in the tree but not loaded by
   `index.html`.)
 - **Database changes are additive and idempotent.** `space-invites.ts` adds `target_user_id`,
   `declined_at` and an index on first invite/search use (`space-invites.sql` has the same SQL for
   operators who prefer to apply it up front). `group-access.ts` creates `group_shares` and
-  `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start.
-- **This checkout is not the running stack.** The live containers on Host-002 bind-mount
+  `group_message_authors` on demand. `local-runners.ts` creates `local_runner_devices` at api start
+  and, since M2a, adds its new columns plus `local_runner_pairings` and `local_runner_models`.
+- **This checkout is not the running stack.** The live containers on Host-001 bind-mount
   `/home/cr1m3/projects/rakazo/patches`. Changes are copied there and the affected service is
   restarted. Check the mounts before applying changes; editing this repo alone does not update the
   running stack. As of 2026-10-08 the runtime patch files tracked here match the live stack
   (the live tree also keeps local-only `dist.broken/` and `stock-dist/` copies, not tracked).
 
-## Share your local AI — running M1
+## Share your local AI — M1 + M2a
 
-Owner-only, same-host prototype: one bot answers via a model on the owner's machine, through an
-outbound runner (no inbound port). Details: [`docs/share-local-ai.md` → M1 as built](docs/share-local-ai.md#m1-as-built-2026-10-08).
+A bot can answer through a model on its owner's computer, via an outbound runner (no inbound
+port). Details: [`docs/share-local-ai.md`](docs/share-local-ai.md) (M1 as built) and
+[`docs/m2-plan.md` §12](docs/m2-plan.md#12-m2a-as-built-2026-10-08) (M2a as built).
 
-1. Compose already sets `RAKAZO_SHARED_LOCAL_GATEWAY_URL` / `RAKAZO_SHARED_LOCAL_MODELS` and mounts
-   the gateway/provider patches for `api` and `worker`.
-2. Seed a device token into a `0600` file (never printed) — see [`runner/README.md`](runner/README.md#1-seed-a-device-token-operator-once).
-3. `runner/scripts/start.sh` (stop: `runner/scripts/stop.sh`; log: `~/.config/rakazo-runner/runner.log`).
-4. Point one bot at it (operator SQL; no UI in M1):
-   `UPDATE bots SET "modelProvider"='shared-local', "modelId"='gemma4:26b-a4b-it-q4_K_M' WHERE id='<bot>';`
+**M2a: connect computers from the web** (flag `RAKAZO_LOCAL_RUNNERS_UI=1` on the api, set in the
+compose override):
 
-If the runner is offline the bot's reply fails with *"{Bot} runs on {owner}'s computer, which is
-offline right now. Try again later."* — no fallback model (decision D1).
+1. **Settings → My hardware → Add a computer.** The dialog detects the OS:
+   - Linux/macOS: one `curl … | sh -s -- --code XXXX-XXXX` command;
+   - Windows: a downloadable `.cmd` with the code inside.
+   The installer gets Node.js if needed (portable, checksum-verified), installs the pinned runner,
+   pairs, starts it, and sets up autostart (systemd --user / launchd / Startup folder). The
+   dialog flips to **connected** by itself. On a computer that already runs a runner (M1
+   `start.sh` or an earlier install) it keeps the existing connection and only upgrades and
+   restarts the runner. Anything ambiguous (another server or account) is refused without changes;
+   `--replace` connects it as a new computer. Only one runner ever uses a config folder (see
+   [`runner/README.md`](runner/README.md#existing-installs-upgrade-replace-one-runner-per-folder)).
+2. Switch on the models to offer (all start off). Per computer you can **Rename**,
+   **Pause sharing**, use **New key** (rotate) and **Remove** (revoke). Up to 10 computers per
+   account.
+3. Binding bots to a computer from the UI, and grants for shared groups, come in M2b/M2c. Until
+   then, a `shared-local` bot uses any online computer of its owner that offers its model.
+
+**M1 (operator path, still supported):** seed a device into a `0600` file (see
+[`runner/README.md`](runner/README.md#4-operator-seeding-m1-path-still-supported)), then run
+`runner/scripts/start.sh`. Point one bot at it with SQL:
+`UPDATE bots SET "modelProvider"='shared-local', "modelId"='gemma4:26b-a4b-it-q4_K_M' WHERE id='<bot>';`
+
+If no runner is online, the bot's reply fails with *"{Bot} runs on {owner}'s computer, which is
+offline right now. Try again later."* There is no fallback model (decision D1).
 
 ## API surface
 
@@ -273,12 +300,19 @@ RAKAZO_TEST_URL=http://127.0.0.1:5173 node tests/social-smoke.mjs
   (`onboarding@resend.dev`), magic links are only delivered to the Resend account owner's address;
   other recipients are rejected. Real multi-user sign-up needs a verified domain and `EMAIL_FROM`.
 - **No password flow for magic-only users** yet (planned in Settings).
+- **Local runners (M2a).**
+  - macOS and Windows installers are written and unit-checked, but were only tested end to end on
+    Linux.
+  - Pairing failures are rate-limited per client address (10 per 10 min) and globally (300 per
+    10 min). A determined attacker can still delay pairing for others for up to 10 minutes; real
+    edge rate limits come with M3.
+  - Bots aren't bound to a specific computer until M2b.
 
 ## Safety
 
 - Never commit real `.env` values, SMTP keys, auth secrets or API keys. Keep LAN/tunnel origins
   (`WEB_ORIGIN`, `BETTER_AUTH_URL`, `API_URL`, `RAKAZO_HOST`) in the local `.env` only.
-- All Rakazo / Host-002 patches belong in this repository.
+- All Rakazo / Host-001 patches belong in this repository.
 - Test databases get schema only, never private data.
 
 ## Roadmap
@@ -322,7 +356,11 @@ Items below are **planned, not done**.
   - [x] **M1 — same-host prototype (owner only):** outbound runner ([`runner/`](runner/README.md)),
         api gateway, and a `shared-local` provider for one operator test bot. No pairing UI yet.
         See [`docs/share-local-ai.md` → M1 as built](docs/share-local-ai.md#m1-as-built-2026-10-08).
-  - [ ] **M2 —** pairing UI, revoke/rotate, grants for shared groups.
+  - [x] **M2a —** Settings → My hardware: OS-aware one-step install + pairing code, several
+        computers per account (max 10), model switches, pause, rename, new key, remove.
+        Runner 0.2.0 with model-server auto-detection; WebSocket through the web origin.
+  - [ ] **M2b —** choose a computer + model for a bot in its settings.
+  - [ ] **M2c —** grants for shared groups.
   - [ ] **M3 —** limits and usage.
 
 ### Bot marketplace

@@ -88,3 +88,15 @@ export function verifySharedLocalToken(
 export function hashDeviceToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
+
+let pairingKeyCache: Buffer | undefined;
+/**
+ * Rakijazios M2a: one-time pairing codes are stored as a keyed hash, so a database
+ * read alone cannot brute-force the short code space.
+ */
+export function hashPairingCode(normalizedCode: string): string {
+  pairingKeyCache ??= createHmac("sha256", resolveEncryptionKey(process.env))
+    .update("rakazo:local-runner-pairing-code:v1")
+    .digest();
+  return createHmac("sha256", pairingKeyCache).update(normalizedCode).digest("hex");
+}

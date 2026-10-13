@@ -10,7 +10,7 @@ Users already run capable models on their own machines (Ollama, llama.cpp, LM St
 
 Neither path lets user A safely offer *their* laptop GPU to bots that user B talks to in a shared group:
 
-- A remote user's `http://127.0.0.1:11434` is not reachable from the Host-002 worker.
+- A remote user's `http://127.0.0.1:11434` is not reachable from the Host-001 worker.
 - Opening inbound ports or Cloudflare tunnels is the wrong default for non-technical users.
 - The existing OpenAI-compatible URL allowlist deliberately rejects most public and DNS-to-private hostnames (SSRF defense). So "just paste your home IP" is both insecure and often blocked by policy.
 
@@ -50,9 +50,9 @@ models (account-wide free-model limits apply), but a key is always required: an 
 `POST https://openrouter.ai/api/v1/chat/completions` with a `:free` model returned **HTTP 401**
 ("No cookie auth credentials found") when verified on 2026-10-08.
 
-## 3. What the code already does (facts from Host-002)
+## 3. What the code already does (facts from Host-001)
 
-Inspected against the running image stack and `rakazo-online` patches (2026-10-08).
+Inspected against the running image stack and `rakijazios` patches (2026-10-08).
 
 ### 3.1 Credentials and preferences
 
@@ -79,7 +79,7 @@ Shared group sends (`group-sharing.ts` → `thread-target.ts`) already set execu
 - Deployment env (api/worker): `RAKAZO_LOCAL_MODELS_URL=http://host.docker.internal:11434/v1`, `RAKAZO_LOCAL_MODELS=gemma4:26b-…,…`, `PI_DEFAULT_PROVIDER=openai-compatible`.
 - Keyless catalog provider id: **`local`** (`pi-local-provider.ts`). Bot `Chief` uses `local` / `gemma4:26b-a4b-it-q4_K_M`.
 - Owner also has an `openai-compatible` credential with preference model `hermes-gemma4-e4b:latest`.
-- Ollama on Host-002 `:11434` serves those models; containers reach it via `host.docker.internal` (HTTP 200 from api).
+- Ollama on Host-001 `:11434` serves those models; containers reach it via `host.docker.internal` (HTTP 200 from api).
 
 The `local` provider is **one server per deployment**, configured by the operator. It is not multi-tenant "each user brings a machine."
 
@@ -153,7 +153,7 @@ sequenceDiagram
 
 Workers do not need to reach the user's LAN. Api (or a dedicated gateway service) holds the WebSocket; if api is multi-instance, use Redis to route request frames to the instance that owns the socket (**O2**).
 
-**Alternative:** HTTP reverse proxy on `http://127.0.0.1:<worker-sidecar>/v1/...` — more moving parts on Host-002; only worth it if we must avoid a custom provider.
+**Alternative:** HTTP reverse proxy on `http://127.0.0.1:<worker-sidecar>/v1/...` — more moving parts on Host-001; only worth it if we must avoid a custom provider.
 
 ## 5. Runner protocol (draft)
 
@@ -279,10 +279,10 @@ V1 **does not** grant file/command/computer access. Computer sandbox stays on Ra
 
 ### M1 — Same-host prototype (owner only)
 
-- Runner binary + outbound WS to api; dial local Ollama (`127.0.0.1:11434` or Host-002's existing server).
+- Runner binary + outbound WS to api; dial local Ollama (`127.0.0.1:11434` or Host-001's existing server).
 - Gateway in api; `shared-local` provider wired in worker for **one** test bot owned by the operator.
 - No pairing UI yet: seed device token via CLI against the operator account.
-- **Tests:** unit protocol codec; integration with Ollama on Host-002; one headless chat producing a real reply through the runner (not direct `host.docker.internal`).
+- **Tests:** unit protocol codec; integration with Ollama on Host-001; one headless chat producing a real reply through the runner (not direct `host.docker.internal`).
 - **Success:** `Chief` or a clone answers via runner while tcpdump shows no inbound port to the runner.
 
 #### M1 as built (2026-10-08)
@@ -359,6 +359,10 @@ grants exist.** Runs longer than 1 h would outlive the run token.
 
 ### M2 — Pairing UI + grants
 
+Approved plan: [`m2-plan.md`](m2-plan.md). **M2a (pairing, My hardware, runner 0.2) is built.**
+See [m2-plan.md §12](m2-plan.md#12-m2a-as-built-2026-10-08). M2b (bot binding) and M2c (group
+grants) are next. Until M2c, keep shared-local bots out of shared groups.
+
 - Settings → My hardware, pairing code flow, revoke/rotate.
 - Assign offered models to bots; grants for shared groups.
 - Transparency copy in Share / group UI.
@@ -380,14 +384,14 @@ grants exist.** Runs longer than 1 h would outlive the run token.
 
 - Installable Rakijazios app that bundles chat client + one-click local model + runner. See §13.
 
-Each milestone ships behind a feature flag / deployment setting so Host-002 can enable without exposing unfinished UI.
+Each milestone ships behind a feature flag / deployment setting so Host-001 can enable without exposing unfinished UI.
 
 ## 11. Open questions
 
 | Id | Question | Notes |
 |---|---|---|
 | **O1** | Provider id + how the worker reaches the gateway | Custom `shared-local` fetch vs virtual HTTP URL on allowlisted host. SSRF rules make naïve `http://api:3100/...` problematic. |
-| **O2** | Multi-instance api sticky sessions | Single Host-002 replica is enough for M1–M2; Redis routing needed before HA. |
+| **O2** | Multi-instance api sticky sessions | Single Host-001 replica is enough for M1–M2; Redis routing needed before HA. |
 | **O3** | Long-poll fallback | Implement only if real users hit WS blocks. |
 | **O4** | ~~Automatic fallback model when offline~~ | **Decided (D1):** no fallback; the reply fails with a clear notice. |
 | **O5** | Stream framing: SSE passthrough vs normalized JSON deltas | Passthrough is less work and matches openai-compatible clients. |
@@ -472,5 +476,5 @@ Same model as the runner (§7):
 - `packages/db/src/model-credentials.ts` — `findModelCredential` scope  
 - `packages/contracts/src/openai-compatible-ui.ts` — connect form helpers  
 - `patches/api/group-sharing.ts` + `thread-target.ts` — shared sends as owner  
-- Host-002: Ollama `:11434`, env `RAKAZO_LOCAL_MODELS_*`
+- Host-001: Ollama `:11434`, env `RAKAZO_LOCAL_MODELS_*`
 

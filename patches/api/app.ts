@@ -89,6 +89,7 @@ import { mountSocialRoutes } from "./social.js";
 import { mountGroupSharing } from "./group-sharing.js";
 import { mountSpaceInvites } from "./space-invites.js";
 import { createLocalRunnerGateway, ensureLocalRunnerTables } from "./local-runners.js";
+import { mountLocalRunnerControl } from "./local-runner-control.js";
 import { mapDomainRpcErrors } from "./rpc-errors.js";
 import {
   createMessagingInboundHandler,
@@ -547,7 +548,17 @@ export async function createApp(
   mountGroupSharing(app, { prisma, auth, sessionHeaders, events, jobs });
   await ensureLocalRunnerTables(prisma);
   const localRunnerGateway = createLocalRunnerGateway({ prisma });
+  // Rakijazios M2a: cookie mutations on My hardware must come from our origin.
+  // Runners and the worker send no Origin header, so they pass unchanged.
+  app.use("/api/local-runners/*", trustedSocialMutation);
   localRunnerGateway.mountHttp(app);
+  mountLocalRunnerControl(app, {
+    prisma,
+    auth,
+    sessionHeaders,
+    gateway: localRunnerGateway,
+    webOrigin: env.webOrigin,
+  });
   mountComputerSettings(app, {
     prisma,
     auth,

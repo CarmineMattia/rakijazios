@@ -9,6 +9,10 @@ export type HelloFrame = {
   token: string;
   runnerVersion: string;
   offeredModels: string[];
+  /** M2a: e.g. "linux-x64" (informational) */
+  platform?: string;
+  /** M2a: which local server was found, e.g. "ollama"; "none" when nothing answers */
+  modelServer?: string;
 };
 
 export type HeartbeatFrame = { type: "heartbeat"; at?: number };
@@ -16,7 +20,9 @@ export type HeartbeatAckFrame = { type: "heartbeat_ack"; at?: number };
 
 export type ModelsFrame = {
   type: "models";
-  models: Array<{ id: string; name?: string }>;
+  models: Array<{ id: string; name?: string; contextWindow?: number }>;
+  /** M2a: which local server answered, or "none" */
+  modelServer?: string;
 };
 
 export type InferRequestFrame = {
@@ -53,8 +59,13 @@ export type PolicyFrame = {
   type: "policy";
   maxInFlight?: number;
   hardTimeoutMs?: number;
+  /** M2a: false = the owner paused sharing for this computer */
+  enabled?: boolean;
+  /** M2a: models the owner switched on; anything else is refused locally too */
+  allowedModels?: string[];
 };
 
+/** reason: "revoked" | "rotated" | "replaced" | "maintenance" | … */
 export type ByeFrame = { type: "bye"; reason?: string };
 
 export type ClientToServerFrame =
