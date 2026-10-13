@@ -51,8 +51,10 @@
     if (version !== epoch || !data.bots.length) return;
     const box = el('div'); box.setAttribute('data-rk-local-grants', '1');
     box.append(el('h3', 'Bots on your computer', { style: 'margin:8px 0 0;font-size:15px' }));
-    const missing = data.bots.filter(b => !b.granted);
-    if (data.shared && missing.length) box.append(el('p', `${missing.map(b => b.name).join(', ')} won't answer people in this group until you allow it.`, { className: 'rk-group-hint', style: 'color:#f59e0b' }));
+    // Kept in sync with every toggle, so turning a grant off shows the warning at once.
+    const warning = el('p', '', { className: 'rk-group-hint', style: 'color:#f59e0b' }); warning.setAttribute('data-rk-grant-warning', '1'); box.append(warning);
+    const updateWarning = () => { const missing = data.bots.filter(b => !b.granted); warning.textContent = data.shared && missing.length ? `${missing.map(b => b.name).join(', ')} won't answer people in this group until you allow it.` : ''; warning.hidden = !warning.textContent; };
+    updateWarning();
     for (const bot of data.bots) {
       const row = el('div', '', { className: 'rk-group-row' }); row.setAttribute('data-rk-grant', bot.botId);
       const label = el('span'); label.append(el('div', `Let ${bot.name} answer for people in this group`), el('div', 'Their messages in this group will be sent to the model on your computer.', { className: 'rk-group-hint' }));
@@ -60,7 +62,7 @@
       row.append(label, button); box.append(row);
       button.addEventListener('click', async () => {
         button.disabled = true;
-        try { await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/grants`, { botId: bot.botId, allowed: !bot.granted }); bot.granted = !bot.granted; button.textContent = bot.granted ? 'Turn off' : 'Allow'; }
+        try { await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/grants`, { botId: bot.botId, allowed: !bot.granted }); bot.granted = !bot.granted; button.textContent = bot.granted ? 'Turn off' : 'Allow'; updateWarning(); }
         catch (error) { button.textContent = error.message; }
         finally { button.disabled = false; }
       });
