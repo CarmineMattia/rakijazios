@@ -22,3 +22,21 @@ describe("classifySharedLocalFailure", () => {
     }
   });
 });
+
+describe("shared-local refusals (M2b)", () => {
+  it("maps typed gateway refusals to readable notices, not offline", async () => {
+    const { sharedLocalRefusalKind, sharedLocalRefusalNotice } = await import("./executor.js");
+    expect(sharedLocalRefusalKind('403 [shared_local_group_denied] This bot runs…')).toBe("group_denied");
+    expect(sharedLocalRefusalKind("shared_local_external_denied")).toBe("external_denied");
+    expect(sharedLocalRefusalKind("[shared_local_run_ended] This run has ended.")).toBe("run_ended");
+    expect(sharedLocalRefusalKind("shared_local_offline")).toBeNull();
+    expect(sharedLocalRefusalKind("shared_local_busy")).toBeNull();
+    expect(sharedLocalRefusalNotice("group_denied", "Chief", "Carmine", "m")).toBe(
+      "Chief runs on Carmine's computer and isn't enabled for this shared group.",
+    );
+    expect(sharedLocalRefusalNotice("paused", "Chief", "Carmine", "m")).toContain("paused");
+  });
+  it("treats an idle timeout as a drop", () => {
+    expect(classifySharedLocalFailure("Inference idle timeout (no tokens for 5 min)")).toBe("offline");
+  });
+});

@@ -480,6 +480,141 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     }),
   );
 
+  // ---- M2b: "On my computer" — bind a bot to one computer + model ----
+  type BotRow = {
+    id: string;
+    name: string;
+    model_provider: string | null;
+    model_id: string | null;
+    device_id: string | null;
+    bound_model_id: string | null;
+  };
+
+  async function ownerBots(uid: string, botId?: string): Promise<BotRow[]> {
+    return prisma.$queryRawUnsafe<BotRow[]>(
+      `SELECT b.id, b.name, b."modelProvider" AS model_provider, b."modelId" AS model_id,
+              bb.device_id, bb.model_id AS bound_model_id
+         FROM bots b LEFT JOIN local_runner_bot_bindings bb ON bb.bot_id = b.id
+        WHERE b."userId" = $1 AND b."archivedAt" IS NULL AND ($2::text IS NULL OR b.id = $2)
+        ORDER BY b.name`,
+      uid,
+      botId ?? null,
+    );
+  }
+
+  function botView(b: BotRow) {
+    const shared = b.model_provider === "shared-local";
+    return {
+      id: b.id,
+      name: b.name,
+      onMyComputer: shared,
+      deviceId: b.device_id,
+      modelId: shared ? b.model_id : null,
+      // Shared-local but no binding (owner has several computers) or a stale one.
+      needsSetup: shared && (!b.device_id || b.bound_model_id !== b.model_id),
+    };
+  }
+
+  /** Models the owner switched on, per active computer, with live availability. */
+  app.get(
+    "/api/local-runners/offered-models",
+    route(async (c) => {
+      const uid = await userId(c);
+      const rows = await prisma.$queryRawUnsafe<
+        Array<{ device_id: string; name: string; enabled: boolean; model_id: string; context_window: number | null }>
+      >(
+        `SELECT d.id AS device_id, d.name, d.enabled, m.model_id, m.context_window
+           FROM local_runner_devices d JOIN local_runner_models m ON m.device_id = d.id
+          WHERE d.user_id = $1 AND d.status = 'active' AND m.enabled
+          ORDER BY d.created_at, m.model_id`,
+        uid,
+      );
+      const devices = new Map<string, { id: string; name: string; online: boolean; paused: boolean; models: unknown[] }>();
+      for (const r of rows) {
+        let d = devices.get(r.device_id);
+        if (!d) {
+          d = { id: r.device_id, name: r.name, online: gateway.deviceInfo(r.device_id).online, paused: r.enabled === false, models: [] };
+          devices.set(r.device_id, d);
+        }
+        d.models.push({
+          id: r.model_id,
+          contextWindow: r.context_window,
+          availableNow: gateway.offeredModels(r.device_id).includes(r.model_id),
+        });
+      }
+      return c.json({ devices: [...devices.values()] });
+    }),
+  );
+
+  app.get(
+    "/api/local-runners/bots",
+    route(async (c) => {
+      const uid = await userId(c);
+      return c.json({ bots: (await ownerBots(uid)).map(botView) });
+    }),
+  );
+
+  app.get(
+    "/api/local-runners/bots/:botId",
+    route(async (c) => {
+      const uid = await userId(c);
+      const bot = (await ownerBots(uid, c.req.param("botId")!.slice(0, 64)))[0];
+      if (!bot) throw new HttpError(404, "Not found");
+      return c.json(botView(bot));
+    }),
+  );
+
+  app.post(
+    "/api/local-runners/bots/:botId/model",
+    route(async (c) => {
+      const uid = await userId(c);
+      const bot = (await ownerBots(uid, c.req.param("botId")!.slice(0, 64)))[0];
+      if (!bot) throw new HttpError(404, "Not found");
+      const body = await readBody(c);
+      if (body.clear === true) {
+        await prisma.$executeRawUnsafe(`DELETE FROM local_runner_bot_bindings WHERE bot_id = $1`, bot.id);
+        // Back to the space default model; never to someone else's key.
+        await prisma.$executeRawUnsafe(
+          `UPDATE bots SET "modelProvider" = NULL, "modelId" = NULL, "updatedAt" = NOW()
+            WHERE id = $1 AND "userId" = $2 AND "modelProvider" = 'shared-local'`,
+          bot.id,
+          uid,
+        );
+        return c.json(botView((await ownerBots(uid, bot.id))[0]!));
+      }
+      const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+      const modelId = typeof body.modelId === "string" ? body.modelId.trim() : "";
+      if (!deviceId || !modelId || modelId.length > 200) throw new HttpError(400, "Pick a computer and a model.");
+      const device = await ownedDevice(uid, deviceId);
+      const model = await prisma.$queryRawUnsafe<Array<{ enabled: boolean }>>(
+        `SELECT enabled FROM local_runner_models WHERE device_id = $1 AND model_id = $2`,
+        device.id,
+        modelId,
+      );
+      if (!model[0]?.enabled) {
+        throw new HttpError(409, "Switch this model on for that computer first (My hardware).");
+      }
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO local_runner_bot_bindings (bot_id, user_id, device_id, model_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (bot_id) DO UPDATE SET device_id = EXCLUDED.device_id, model_id = EXCLUDED.model_id,
+           user_id = EXCLUDED.user_id, updated_at = NOW()`,
+        bot.id,
+        uid,
+        device.id,
+        modelId,
+      );
+      await prisma.$executeRawUnsafe(
+        `UPDATE bots SET "modelProvider" = 'shared-local', "modelId" = $3, "updatedAt" = NOW()
+          WHERE id = $1 AND "userId" = $2`,
+        bot.id,
+        uid,
+        modelId,
+      );
+      return c.json(botView((await ownerBots(uid, bot.id))[0]!));
+    }),
+  );
+
   function parseDeviceCredentials(raw: unknown): { deviceId: string; token: string } | null {
     if (!raw || typeof raw !== "object") return null;
     const r = raw as { deviceId?: unknown; token?: unknown };

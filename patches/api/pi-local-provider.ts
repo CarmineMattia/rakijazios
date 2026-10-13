@@ -128,6 +128,41 @@ export { SHARED_LOCAL_PROVIDER_ID } from "./shared-local-token.js";
 const SHARED_DEFAULT_CONTEXT_WINDOW = 32_768;
 const SHARED_DEFAULT_MAX_TOKENS = 4_096;
 
+/**
+ * Rakijazios M2b: shared-local model ids come from what owners' runners report,
+ * not from an env list. The executor calls `ensureSharedLocalModel` with the
+ * bot's bound model before a run (after the gateway confirmed it); every Models
+ * collection the shared-local provider was put on is then refreshed in place,
+ * including pi-runtime's cached catalog, so no pi-runtime patch is needed.
+ * RAKAZO_SHARED_LOCAL_MODELS stays as an optional seed (M1 compatibility).
+ */
+const dynamicSharedLocal = new Map<string, number | undefined>();
+const MAX_DYNAMIC_SHARED_LOCAL = 500;
+const sharedLocalCollections = new Set<WeakRef<MutableModels>>();
+
+export function ensureSharedLocalModel(id: string, contextWindow?: number | null): void {
+  const modelId = id.trim();
+  if (!modelId || modelId.length > 200) return;
+  const ctx = contextWindow && contextWindow > 0 ? Math.min(contextWindow, 2_000_000) : undefined;
+  if (dynamicSharedLocal.has(modelId) && dynamicSharedLocal.get(modelId) === ctx) return;
+  if (!dynamicSharedLocal.has(modelId) && dynamicSharedLocal.size >= MAX_DYNAMIC_SHARED_LOCAL) {
+    const oldest = dynamicSharedLocal.keys().next().value;
+    if (oldest !== undefined) dynamicSharedLocal.delete(oldest);
+  }
+  dynamicSharedLocal.set(modelId, ctx);
+  const provider = sharedLocalProvider();
+  if (!provider) return;
+  for (const ref of [...sharedLocalCollections]) {
+    const models = ref.deref();
+    if (!models) sharedLocalCollections.delete(ref);
+    else models.setProvider(provider);
+  }
+}
+
+export function sharedLocalKnownModelIds(): string[] {
+  return [...new Set([...sharedLocalModelIds(), ...dynamicSharedLocal.keys()])];
+}
+
 function sharedLocalModel(id: string): Model<"openai-completions"> {
   return {
     id,
@@ -139,14 +174,15 @@ function sharedLocalModel(id: string): Model<"openai-completions"> {
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: tokenLimit("RAKAZO_LOCAL_CONTEXT_WINDOW", SHARED_DEFAULT_CONTEXT_WINDOW),
+    contextWindow:
+      dynamicSharedLocal.get(id) ?? tokenLimit("RAKAZO_LOCAL_CONTEXT_WINDOW", SHARED_DEFAULT_CONTEXT_WINDOW),
     maxTokens: tokenLimit("RAKAZO_LOCAL_MAX_TOKENS", SHARED_DEFAULT_MAX_TOKENS),
   };
 }
 
-/** Operator-configured gateway provider: worker → api → owner's runner. */
+/** Gateway provider: worker → api → owner's runner. */
 export function sharedLocalProvider(): Provider | undefined {
-  const ids = sharedLocalModelIds();
+  const ids = sharedLocalKnownModelIds();
   if (!ids.length) return undefined;
   const baseUrl = sharedLocalGatewayBaseUrl();
   return createProvider({
@@ -168,6 +204,10 @@ export function sharedLocalProvider(): Provider | undefined {
 }
 
 export function registerSharedLocalProvider(models: MutableModels): MutableModels {
+  sharedLocalCollections.add(new WeakRef(models));
+  if (sharedLocalCollections.size > 1000) {
+    for (const ref of sharedLocalCollections) if (!ref.deref()) sharedLocalCollections.delete(ref);
+  }
   const provider = sharedLocalProvider();
   if (provider) models.setProvider(provider);
   return models;
