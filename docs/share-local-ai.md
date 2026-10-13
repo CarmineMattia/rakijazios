@@ -360,8 +360,9 @@ grants exist.** Runs longer than 1 h would outlive the run token.
 ### M2 — Pairing UI + grants
 
 Approved plan: [`m2-plan.md`](m2-plan.md). **M2a (pairing, My hardware, runner 0.2) is built.**
-See [m2-plan.md §12](m2-plan.md#12-m2a-as-built-2026-10-08). M2b (bot binding) and M2c (group
-grants) are next. Until M2c, keep shared-local bots out of shared groups.
+See [m2-plan.md §12](m2-plan.md#12-m2a-as-built-2026-10-08). **M2b (bot binding, run-bound
+tokens, per-request gateway checks) is built**; see [m2-plan.md §13](m2-plan.md#13-m2b-as-built-2026-10-13).
+M2c (group grants) is next. Until then, shared groups and external channels are refused with a notice.
 
 - Settings → My hardware, pairing code flow, revoke/rotate.
 - Assign offered models to bots; grants for shared groups.

@@ -2,7 +2,8 @@
 
 Status: **approved 2026-10-08** with the four recommended decisions (§11) and one change:
 pairing is **OS-aware and as automatic as possible** (§1.1). **M2a is implemented** on
-`feat/share-local-ai-m2a` (see §12); M2b and M2c are still plan.
+`feat/share-local-ai-m2a` (see §12). **M2b is implemented** on `feat/share-local-ai-m2b`
+(see §13). M2c is still plan.
 Base: `main` @ `7637aad` (PR #6, M1). Design: [`share-local-ai.md`](share-local-ai.md) §5–§10.
 Scope: M2 only. Usage limits and accounting stay in M3; the marketplace is M4.
 
@@ -444,3 +445,87 @@ Details: [`runner/README.md`](../runner/README.md#existing-installs-upgrade-repl
 
 **Feature flag.** `RAKAZO_LOCAL_RUNNERS_UI=1` on the api. When it is off, the overlay stays hidden
 and the control/installer routes answer 404. The gateway (`/ws`, `/v1/*`) is unaffected.
+
+## 13. M2b as built (2026-10-13)
+
+Branch `feat/share-local-ai-m2b`, stacked on M2a. Live on Host-001 since 2026-10-13
+(backup `.backups/m2b-20261013-033401`).
+
+**Binding.** `local_runner_bot_bindings(bot_id PK → bots, user_id, device_id → devices ON DELETE
+CASCADE, model_id, created_at, updated_at)`, created by `ensureLocalRunnerTables`. Migration
+`migrateM1Bindings` runs with it (idempotent): a shared-local bot with no binding whose owner has
+exactly one active computer is bound to it, and that model is switched on there. Chief Local was
+bound this way. Owners with several computers see "Pick a computer for this bot" in My hardware,
+and the bot answers with a notice until they do.
+
+**Run-bound token.** `sl2.<owner>.<runId>.<exp>.<hmac>`, sub-key label `…gateway-token:v2`, 12 h
+ceiling. `sl1` is no longer accepted. The 1 h limit is gone: the token lives exactly as long as
+the run, because the gateway re-checks the run on every request.
+
+**Gateway checks (every `/v1/models` and `/v1/chat/completions`).** All of them come from one
+SQL row (`loadSharedLocalAccessRow`) and one pure rule (`decideSharedLocalAccess` in
+`local-runner-pairing.ts`):
+
+1. The run exists, `run.userId` = token owner, and its status is `leased` or `running`.
+   Otherwise `401 shared_local_run_ended`.
+2. The bot belongs to the owner, isn't archived, and `modelProvider = shared-local`.
+3. External: the thread has an `externalConversationId`, or the trigger is `messaging` or
+   `webhook`. Refused (`shared_local_external_denied`).
+4. A group thread with at least one `group_shares` row is refused (`shared_local_group_denied`)
+   until M2c grants. Private 1:1 chats and unshared groups are allowed.
+5. A binding exists → the computer is the owner's and active → not paused → the bot's model
+   equals the bound model → the model is switched on and advertised.
+
+The request is routed **only to the bound computer**; there is no "least busy of any computer"
+any more. `/v1/models` lists only the bound model, with its `context_window`. Every refusal has a
+type, and the executor turns it into a chat notice (no fallback, D1).
+
+**Long answers.** The flat 10-minute timeout is replaced by an idle timeout of 5 min (no token)
+and a hard cap of 30 min. Every 10 s, the gateway also checks in-flight answers against their run:
+a cancelled or finished run stops its stream (`infer.cancel` to the runner).
+
+**Dynamic models.** The worker no longer needs `RAKAZO_SHARED_LOCAL_MODELS`. Before a run,
+`ensureSharedLocalModel(id, ctx)` adds the bound model to the shared-local provider on every Models
+collection it was registered on, including pi-runtime's cached catalog, so no `pi-runtime.ts`
+patch is needed (a deviation from §10). The env list stays only as the M1 "switched on by default"
+seed for operator-seeded computers.
+
+**Owner API** (session auth, behind `RAKAZO_LOCAL_RUNNERS_UI`):
+- `GET /api/local-runners/offered-models`: per computer, the models switched on, and whether each
+  is available right now.
+- `GET /api/local-runners/bots` and `GET /api/local-runners/bots/:botId`: the owner's bots, with
+  `onMyComputer`, `deviceId`, `modelId` and `needsSetup`.
+- `POST /api/local-runners/bots/:botId/model {deviceId, modelId}`: binds the bot and sets it to
+  `shared-local/<model>`. The model must be switched on (409 otherwise). Another account's bot
+  gets 404.
+- `POST /api/local-runners/bots/:botId/model {clear:true}`: removes the binding, and the bot falls
+  back to the space default model.
+
+**UI.** The "Bots on my computer" section in Settings → My hardware has one picker per bot:
+"Not on my computer", or model — computer. This is a deviation from §7: the picker lives in My
+hardware rather than in the bot panel, because the bot panel's minified markup is too fragile to
+overlay. Choosing a model in the normal bot panel moves the bot off `shared-local`, and the
+gateway then refuses the old binding. `bots.update` in `router.ts` was not changed.
+
+**Runner 0.2.2-m2b.**
+- Jittered exponential backoff (50–100 % of 1 s → 30 s).
+- A 20 s connect/hello timeout.
+- Silence detection: no frame from the server for 50 s means a reconnect (half-open TCP).
+- A single reconnect timer, cleared on stop.
+- Old runners keep working; the protocol is unchanged.
+
+**Tests.**
+- api and adapters `tsc --noEmit` pass.
+- vitest: `shared-local-token`, `shared-local-access`, `executor-shared-local`, pairing,
+  install.
+- `runner` node tests: 47/47.
+- `e2e/m2b/60-m2b-bind.mjs`: 20 checks, see below.
+
+`e2e/m2b/60-m2b-bind.mjs` uses a qa account with a throwaway runner. It checks:
+- binding from the UI, and refusal for a model that is switched off;
+- a real 1:1 answer;
+- the shared group, pause, model-off and offline notices;
+- gateway 401s for an ended run, a forged `sl2`, an old `sl1` and no token;
+- that another account can't bind or list the bot;
+- that unbinding works;
+- 0 secrets in the logs.
