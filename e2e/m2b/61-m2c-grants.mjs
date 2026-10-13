@@ -116,7 +116,12 @@ try {
     await api(page, `/api/local-runners/groups/${GROUP}/grants`, { method: 'POST', body: JSON.stringify({ botId: BOT, allowed: true }) });
     const long = await send('Write a very long, detailed 2000-word story about a lighthouse keeper. Do not summarize.', false);
     await waitFor(() => sql(`select count(*) from runs where "botId"='${BOT}' and "createdAt" > '${long.since}' and status='running'`) === '1' || null, 60000, 200);
-    await sleep(2500);
+    // Revoke the moment tokens start arriving on the throwaway computer (no fixed delay).
+    const streaming = await waitFor(async () => {
+      const d = (await api(page, '/api/local-runners/devices')).body?.devices?.find((x) => x.id === created.devId);
+      return d?.health?.streaming > 0 || null;
+    }, 90000, 100);
+    if (!streaming) console.log(`attempt ${attempt}: answer never started streaming`);
     revoke = await api(page, `/api/local-runners/groups/${GROUP}/grants`, { method: 'POST', body: JSON.stringify({ botId: BOT, allowed: false }) });
     midRun = await finished(long.since);
     if (revoke.body?.cancelled > 0) break;

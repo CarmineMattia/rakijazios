@@ -66,6 +66,8 @@ export class LocalRunnerClient {
   private readonly startedAt = Date.now();
   private lastError: { message: string; at: number } | null = null;
   private healthKey = "";
+  /** The last probe found a model server (a pinned URL can be set but not answering). */
+  private serverOk = false;
 
   constructor(opts: RunnerOptions) {
     this.opts = opts;
@@ -111,10 +113,19 @@ export class LocalRunnerClient {
       const found = await discoverModelServer(fixed, this.opts.fetchImpl, { only: true });
       this.server = { kind: found?.kind ?? "openai-compatible", baseUrl: fixed };
       this.models = filterModels(found?.models ?? [], this.opts.modelFilter);
+      this.serverOk = Boolean(found);
+      if (!found) {
+        let where = "the configured address";
+        try {
+          where = new URL(fixed).host;
+        } catch {}
+        this.noteError(`Pinned model server (${where}) is not answering`);
+      }
     } else {
       const found = await discoverModelServer(this.server?.baseUrl, this.opts.fetchImpl);
       this.server = found ? { kind: found.kind, baseUrl: found.baseUrl } : null;
       this.models = filterModels(found?.models ?? [], this.opts.modelFilter);
+      this.serverOk = Boolean(found);
     }
     if (!this.server) this.noteError("No local model server is answering on this computer");
     const key = `${this.server?.baseUrl ?? ""}|${this.models.map((m) => `${m.id}:${m.contextWindow ?? ""}`).join(",")}`;
@@ -138,13 +149,26 @@ export class LocalRunnerClient {
     this.sendHealth();
   }
 
+  /** Current health report (what `health` frames carry; also for tests). */
+  healthReport() {
+    return {
+      type: "health" as const,
+      modelServer: this.server?.kind ?? "none",
+      modelServerOk: this.serverOk,
+      models: this.models.length,
+      inFlight: this.inFlight.size,
+      uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
+      ...(this.lastError ? { lastError: this.lastError.message, lastErrorAt: this.lastError.at } : {}),
+    };
+  }
+
   /** Send `health` when it changed (or always, for a check). */
   private sendHealth(checkId?: string, latencyMs?: number): void {
     if (!this.connected) return;
     const frame = {
       type: "health" as const,
       modelServer: this.server?.kind ?? "none",
-      modelServerOk: Boolean(this.server),
+      modelServerOk: this.serverOk,
       models: this.models.length,
       inFlight: this.inFlight.size,
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
@@ -160,7 +184,10 @@ export class LocalRunnerClient {
 
   private async healthCheck(id: string): Promise<void> {
     const t0 = Date.now();
-    await this.refreshModels().catch((err) => this.noteError(`Model server check failed: ${err instanceof Error ? err.message : String(err)}`));
+    await this.refreshModels().catch((err) => {
+      this.serverOk = false;
+      this.noteError(`Model server check failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     this.sendHealth(id.slice(0, 64), Date.now() - t0);
   }
 

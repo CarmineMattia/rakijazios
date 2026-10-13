@@ -108,6 +108,8 @@ type PendingInfer = {
   groupId: string | null;
   lastChunkAt: number;
   chunks: string[];
+  /** At least one token arrived (the answer is streaming). */
+  streamed?: boolean;
   status?: number;
   error?: { message: string; retryable: boolean };
   done: boolean;
@@ -155,6 +157,8 @@ export type DeviceLiveInfo = {
   runnerVersion?: string | null;
   health?: RunnerHealth | null;
   inFlight?: number;
+  /** In-flight answers that already received tokens. */
+  streaming?: number;
   answers?: number;
   lastAnswerAt?: number | null;
   lastFailure?: { message: string; at: number } | null;
@@ -729,6 +733,7 @@ export function createLocalRunnerGateway(deps: {
           const p = pending.get(id);
           if (p && !p.done && session.inFlight.has(id)) {
             p.lastChunkAt = Date.now();
+            p.streamed = true;
             p.chunks.push(dataLine);
             wake(p);
           }
@@ -1055,6 +1060,7 @@ export function createLocalRunnerGateway(deps: {
         runnerVersion: session.runnerVersion || null,
         health: session.health,
         inFlight: session.inFlight.size,
+        streaming: [...session.inFlight].filter((id) => pending.get(id)?.streamed).length,
         ...common,
       };
     },

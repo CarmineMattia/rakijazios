@@ -306,6 +306,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
             health: {
               report: live.health ?? null,
               inFlight: live.inFlight ?? 0,
+              streaming: live.streaming ?? 0,
               answers: live.answers ?? 0,
               lastAnswerAt: iso(live.lastAnswerAt),
               lastFailure: live.lastFailure ? { message: live.lastFailure.message, at: iso(live.lastFailure.at) } : null,

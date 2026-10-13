@@ -75,6 +75,23 @@ try {
     ok('uiNotReachable', t, !!t);
     await shot(page, 'health-02-offline');
   }
+
+  // pinned model server that is down (tester repro: RAKAZO_RUNNER_MODEL_URL=http://127.0.0.1:9/v1)
+  const launcher = T + '/home/.local/share/rakijazios-runner/rakazo-runner';
+  const { spawn } = await import('node:child_process');
+  const child = spawn(launcher, ['run'], { env: { ...env(), RAKAZO_RUNNER_MODEL_URL: 'http://127.0.0.1:9/v1' }, stdio: 'ignore', detached: true });
+  child.unref();
+  const pinned = await waitFor(async () => { const c = await api(page, `/api/local-runners/devices/${created.devId}/check`, { method: 'POST', body: '{}' }); return c.body?.supported ? c : null; }, 60000, 1000);
+  ok('pinnedDownNotOk', pinned?.body?.health && { ok: pinned.body.health.modelServerOk, models: pinned.body.health.models, lastError: pinned.body.health.lastError },
+    pinned?.body?.health?.modelServerOk === false && /Pinned model server \(127\.0\.0\.1:9\) is not answering/.test(pinned.body.health.lastError || ''));
+  const l3 = (await api(page, '/api/local-runners/devices')).body?.devices?.find((x) => x.id === created.devId);
+  ok('pinnedDownListed', l3?.health?.report && { ok: l3.health.report.modelServerOk, lastError: l3.health.report.lastError }, l3?.health?.report?.modelServerOk === false);
+  if (opened) {
+    await page.click(`[data-rk-device="${created.devId}"] [data-rk="hw-check"]`).catch(() => {});
+    const t = await waitFor(async () => { const s = await page.$eval(`[data-rk-device="${created.devId}"] [data-rk="hw-check-result"]`, (n) => n.textContent).catch(() => ''); return /no model server is answering/.test(s) ? s : null; }, 15000);
+    ok('uiPinnedDown', t, !!t);
+    await shot(page, 'health-03-pinned-down');
+  }
 } finally {
   stopRunner();
   if (created.devId) sql(`delete from local_runner_devices where id='${q(created.devId)}' and user_id='${qaId}'`);
