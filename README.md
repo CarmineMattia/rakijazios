@@ -386,3 +386,42 @@ Items below are **planned, not done**.
       bots, so groups can mix humans and bots running on different hardware. Phones are mainly chat
       clients and light nodes while in the foreground. Vision:
       [`docs/share-local-ai.md` §13](docs/share-local-ai.md#13-vision-rakijazios-app-as-a-device-node-m5).
+
+### Device control mode (long-term, after M5)
+
+- [ ] **Opt-in help on your own computer.** Today a bot can't open a terminal or touch files on the
+      owner's desktop: bots only have their sandbox shell, and the runner only shares inference.
+      Later, a bot could help fix problems on the owner's computer **through the runner**, but only
+      when the owner opts in, and only safely:
+  - **Two separate toggles in the chat composer** (next to **+**, dimmed when off, lit when on):
+    **Browser** (globe: open pages, click, type) and **Computer** (monitor: files and shell). Both
+    are **off by default**, enabled per device **and** per bot, and only after a plain-language
+    explanation modal and confirmation on the device.
+  - The owner chooses which bots and groups may use it. Shared-group members never get it by default.
+  - **Every** command or file action needs explicit approval from the owner, **on that device**.
+    An allowlist or a read-only mode are options.
+  - A full audit log, an instant kill switch and revocation. No silent background execution.
+  - A clear UI and group badges, e.g. "can use {owner}'s browser".
+  - A threat model covering prompt injection from group messages, exfiltration, privilege
+    escalation, approval fatigue and a compromised server pushing commands. Inference stays
+    separate from control.
+
+  Design notes and open questions:
+  [`docs/share-local-ai.md` §14](docs/share-local-ai.md#14-long-term-device-control-mode).
+
+### Live voice mode (long-term)
+
+- [ ] **Talk to a bot live.** Clicking the bot's icon/avatar next to the composer makes the bot
+      greet you out loud in its own voice (a short "ehi" or a sound). It then opens a live,
+      interactive voice conversation with that bot and its personality, with a clear
+      listening/speaking indicator and the transcript kept in the chat. Separate from Device
+      control mode. Open questions:
+  - STT/TTS engines, local vs cloud, and cost. The local runner could serve STT/TTS (link with
+    Share your local AI).
+  - A voice per bot.
+  - Latency and barge-in (interrupting the bot).
+  - Mic permission and a clear on/off/listening indicator.
+  - How it works in shared groups.
+  - Audio privacy and retention.
+
+  Idea note: [`docs/live-voice-mode.md`](docs/live-voice-mode.md).
