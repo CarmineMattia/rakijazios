@@ -114,3 +114,91 @@ export class FailureLimiter {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Rakijazios M2b: who may use a shared-local bot right now.
+// The gateway loads one row per request (run + bot + thread + binding + computer
+// + model) and this pure function decides. Every refusal carries a type the
+// executor turns into a readable chat notice; nothing falls back to another model.
+// ---------------------------------------------------------------------------
+
+export type SharedLocalAccessRow = {
+  run_user_id: string;
+  run_status: string;
+  run_trigger: string;
+  bot_user_id: string;
+  bot_model_provider: string | null;
+  bot_model_id: string | null;
+  bot_archived: boolean;
+  thread_group_id: string | null;
+  thread_external: boolean;
+  group_share_count: number;
+  bind_device_id: string | null;
+  bind_model_id: string | null;
+  device_user_id: string | null;
+  device_status: string | null;
+  device_enabled: boolean | null;
+  model_enabled: boolean | null;
+  model_advertised: boolean | null;
+  model_context_window: number | null;
+};
+
+export type SharedLocalDenyType =
+  | "shared_local_run_ended"
+  | "shared_local_unbound"
+  | "shared_local_removed"
+  | "shared_local_paused"
+  | "shared_local_model_off"
+  | "shared_local_group_denied"
+  | "shared_local_external_denied";
+
+export type SharedLocalAccess =
+  | { ok: true; deviceId: string; modelId: string; contextWindow: number | null }
+  | { ok: false; status: number; type: SharedLocalDenyType; message: string };
+
+/** Triggers that answer outside Rakazo chat (bridged channels, inbound webhooks). */
+const EXTERNAL_TRIGGERS = new Set(["messaging", "webhook"]);
+const LIVE_RUN = new Set(["leased", "running"]);
+
+function deny(status: number, type: SharedLocalDenyType, message: string): SharedLocalAccess {
+  return { ok: false, status, type, message: `[${type}] ${message}` };
+}
+
+export function decideSharedLocalAccess(
+  ownerUserId: string,
+  row: SharedLocalAccessRow | undefined,
+  requestedModel?: string,
+): SharedLocalAccess {
+  if (!row || row.run_user_id !== ownerUserId || !LIVE_RUN.has(row.run_status)) {
+    return deny(401, "shared_local_run_ended", "This run has ended.");
+  }
+  if (row.bot_user_id !== ownerUserId || row.bot_archived || row.bot_model_provider !== "shared-local") {
+    return deny(403, "shared_local_unbound", "This bot no longer runs on its owner's computer.");
+  }
+  if (row.thread_external || EXTERNAL_TRIGGERS.has(row.run_trigger)) {
+    return deny(403, "shared_local_external_denied", "Bots on a personal computer don't answer in external channels.");
+  }
+  if (row.thread_group_id && row.group_share_count > 0) {
+    // M2c adds per-group grants; until then shared groups are refused up front.
+    return deny(403, "shared_local_group_denied", "This bot runs on its owner's computer and isn't enabled for this shared group.");
+  }
+  if (!row.bind_device_id || !row.bind_model_id) {
+    return deny(403, "shared_local_unbound", "This bot isn't connected to a computer yet.");
+  }
+  if (row.device_user_id !== ownerUserId || row.device_status !== "active") {
+    return deny(403, "shared_local_removed", "The computer this bot used was removed.");
+  }
+  if (row.device_enabled === false) {
+    return deny(503, "shared_local_paused", "The owner's computer is paused.");
+  }
+  if (row.bot_model_id !== row.bind_model_id || (requestedModel && requestedModel !== row.bind_model_id)) {
+    return deny(403, "shared_local_model_off", "This bot's model changed. Pick the model again under My hardware.");
+  }
+  if (!row.model_enabled) {
+    return deny(403, "shared_local_model_off", "This model is switched off on the owner's computer.");
+  }
+  if (!row.model_advertised) {
+    return deny(403, "shared_local_model_off", "The owner's computer doesn't offer this model right now.");
+  }
+  return { ok: true, deviceId: row.bind_device_id, modelId: row.bind_model_id, contextWindow: row.model_context_window };
+}

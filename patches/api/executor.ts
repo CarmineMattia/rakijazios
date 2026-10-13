@@ -37,12 +37,11 @@ import {
   isAttachmentImageMimeType,
   OPENAI_COMPATIBLE_PROVIDER_ID,
 } from "@rakazo/contracts";
-import { LOCAL_PROVIDER_ID } from "./pi-local-provider.js";
+import { ensureSharedLocalModel, LOCAL_PROVIDER_ID } from "./pi-local-provider.js";
 import {
-  mintSharedLocalToken,
+  mintSharedLocalRunToken,
   SHARED_LOCAL_PROVIDER_ID,
   sharedLocalGatewayBaseUrl,
-  sharedLocalModelIds,
 } from "./shared-local-token.js";
 import {
   type ActionApprovalRule,
@@ -1323,7 +1322,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         // here with a readable notice (D1) instead of retrying or falling back.
         const sharedLocalError =
           runModelProvider === SHARED_LOCAL_PROVIDER_ID && runModelId
-            ? await sharedLocalSetupError(deps, run.userId, runModelId, bot.name)
+            ? await sharedLocalSetupError(deps, run.userId, runId, runModelId, bot.name)
             : null;
         if (!runModelProvider || !runModelId || sharedLocalError) {
           const setupError = sharedLocalError ?? MISSING_MODEL_MESSAGE;
@@ -1373,6 +1372,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
           runModelProvider,
           runModelId,
           (values) => runSecrets.push(...values),
+          runId,
         );
         runSecrets.push(...resolved.redact);
         await deps.prisma.run.updateMany({
@@ -1882,6 +1882,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 checker.provider,
                 checker.model,
                 (values) => runSecrets.push(...values),
+                runId,
               );
               const judge = await runAutoReviewJudge({
                 runtime: deps.runtime,
@@ -4016,7 +4017,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
           // notice as the offline preflight (D1) instead of a raw provider error.
           const message =
             runModelProvider === SHARED_LOCAL_PROVIDER_ID
-              ? ((await sharedLocalDropNotice(deps, run.userId, bot.name, rawMessage)) ?? rawMessage)
+              ? ((await sharedLocalDropNotice(deps, run.userId, bot.name, rawMessage, runModelId)) ?? rawMessage)
               : rawMessage;
           const failed = await deps.events.finalizeRun({
             spaceId: run.spaceId,
@@ -4541,6 +4542,8 @@ async function resolveModelKey(
   provider: string,
   modelId: string,
   registerSecrets?: (values: string[]) => void,
+  /** Rakijazios M2b: required for shared-local; the gateway token is bound to it. */
+  runId?: string,
 ): Promise<{
   apiKey?: string;
   baseUrl?: string;
@@ -4648,15 +4651,15 @@ async function resolveModelKey(
     return { apiKey: "local", redact: [] };
   }
   if (provider === SHARED_LOCAL_PROVIDER_ID) {
-    // Rakijazios M1: route through the api gateway to the owner's runner.
-    // The bearer is a short-lived HMAC bound to run.userId (the bot owner),
-    // never a user-supplied key, and only valid at the gateway.
-    if (!sharedLocalModelIds().includes(modelId)) {
-      throw new Error(
-        `Model "${modelId}" is not offered by the shared-local gateway on this server.`,
-      );
+    // Rakijazios M2b: route through the api gateway to the bot's bound computer.
+    // The bearer is an HMAC bound to run.userId (the bot owner) AND this run; the
+    // gateway re-checks the run on every request, so it dies when the run ends.
+    // Never a user-supplied key, and only valid at the gateway.
+    if (!runId) {
+      throw new Error("[shared_local_unbound] Models on a personal computer only answer inside a bot run.");
     }
-    const token = mintSharedLocalToken(userId, 60 * 60);
+    ensureSharedLocalModel(modelId);
+    const token = mintSharedLocalRunToken(userId, runId);
     return { apiKey: token, redact: [token] };
   }
   return { apiKey: deploymentKeyFor(deps, provider), redact: [] };
@@ -4680,7 +4683,7 @@ function sharedLocalOfflineNotice(botName: string, ownerName: string): string {
  * the OpenAI client reports "Connection error.", undici "terminated").
  */
 const SHARED_LOCAL_DROP_PATTERN =
-  /shared_local_|runner disconnected|offline right now|inference hard timeout|local model http|\bterminated\b|fetch failed|socket hang up|econnreset|econnrefused|other side closed|\bconnection error\b/i;
+  /shared_local_|runner disconnected|offline right now|inference (?:hard|idle) timeout|local model http|\bterminated\b|fetch failed|socket hang up|econnreset|econnrefused|other side closed|\bconnection error\b/i;
 const SHARED_LOCAL_BUSY_PATTERN = /shared_local_busy|runner is busy/i;
 
 /** Classifies a failed shared-local run's raw error; null = not a transport failure. */
@@ -4690,55 +4693,103 @@ export function classifySharedLocalFailure(rawMessage: string): "busy" | "offlin
   return null;
 }
 
+/** M2b: typed gateway refusals (`[shared_local_<kind>] …`) that are not plain drops. */
+const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|external_denied|unbound|removed|run_ended)\b/i;
+
+export function sharedLocalRefusalKind(rawMessage: string): string | null {
+  return SHARED_LOCAL_TYPED.exec(rawMessage)?.[1]?.toLowerCase() ?? null;
+}
+
+/** Readable chat notice for a gateway refusal (D1: no fallback to another model). */
+export function sharedLocalRefusalNotice(
+  kind: string,
+  botName: string,
+  ownerName: string,
+  modelId: string,
+): string {
+  switch (kind) {
+    case "paused":
+      return `${botName} runs on ${ownerName}'s computer, which is paused right now. Try again later.`;
+    case "model_off":
+      return `${botName} uses ${modelId}, which is switched off or not available on ${ownerName}'s computer right now.`;
+    case "group_denied":
+      return `${botName} runs on ${ownerName}'s computer and isn't enabled for this shared group.`;
+    case "external_denied":
+      return `${botName} runs on ${ownerName}'s computer, so it doesn't answer in external channels.`;
+    case "removed":
+      return `${botName}'s computer was removed. ${ownerName} can pick another one in Settings → My hardware.`;
+    case "unbound":
+      return `${botName} isn't connected to a computer yet. ${ownerName} can pick one in Settings → My hardware.`;
+    case "run_ended":
+      return `${botName} stopped because this run ended.`;
+    default:
+      return `${botName} could not use ${ownerName}'s computer right now. Try again later.`;
+  }
+}
+
 async function sharedLocalDropNotice(
   deps: ExecutorDeps,
   ownerUserId: string,
   botName: string,
   rawMessage: string,
+  modelId = "its model",
 ): Promise<string | null> {
-  const kind = classifySharedLocalFailure(rawMessage);
-  if (!kind) return null;
+  const refusal = sharedLocalRefusalKind(rawMessage);
+  const kind = refusal ? null : classifySharedLocalFailure(rawMessage);
+  if (!refusal && !kind) return null;
   const ownerName = await sharedLocalOwnerName(deps, ownerUserId);
+  if (refusal) return sharedLocalRefusalNotice(refusal, botName, ownerName, modelId);
   return kind === "busy"
     ? `${botName} runs on ${ownerName}'s computer, which is busy right now. Try again shortly.`
     : sharedLocalOfflineNotice(botName, ownerName);
 }
 
 /**
- * Rakijazios M1 (decision D1): before a shared-local run starts, check that the
- * bot owner's runner is connected and offers the model. Returns a readable
- * notice for the chat when it is not; never falls back to another model.
+ * Rakijazios M1/M2b (decision D1): before a shared-local run starts, ask the
+ * gateway (with this run's token) whether the bot's bound computer can serve the
+ * model right now. The gateway runs every check (owner, computer active and not
+ * paused, model switched on and offered, group/external rule). Returns a readable
+ * notice for the chat when it cannot; never falls back to another model.
  */
 async function sharedLocalSetupError(
   deps: ExecutorDeps,
   ownerUserId: string,
+  runId: string,
   modelId: string,
   botName: string,
 ): Promise<string | null> {
   const ownerName = await sharedLocalOwnerName(deps, ownerUserId);
   const offline = sharedLocalOfflineNotice(botName, ownerName);
-  if (!sharedLocalModelIds().includes(modelId)) {
-    return `${botName} uses ${modelId}, which this server does not route to local runners.`;
-  }
   let response: Response;
   try {
     response = await fetch(`${sharedLocalGatewayBaseUrl()}/models`, {
-      headers: { authorization: `Bearer ${mintSharedLocalToken(ownerUserId, 60)}` },
+      headers: { authorization: `Bearer ${mintSharedLocalRunToken(ownerUserId, runId, 120)}` },
       signal: AbortSignal.timeout(5_000),
     });
   } catch {
     return offline;
   }
-  if (response.status === 503) return offline;
+  const payload = (await response.json().catch(() => null)) as {
+    data?: Array<{ id?: unknown; context_window?: unknown }>;
+    error?: { type?: unknown; message?: unknown } | string;
+  } | null;
   if (!response.ok) {
+    const err = payload?.error;
+    const type = err && typeof err === "object" && typeof err.type === "string" ? err.type : "";
+    const refusal = sharedLocalRefusalKind(type);
+    if (refusal) return sharedLocalRefusalNotice(refusal, botName, ownerName, modelId);
+    if (/shared_local_busy/.test(type)) {
+      return `${botName} runs on ${ownerName}'s computer, which is busy right now. Try again shortly.`;
+    }
+    if (response.status === 503) return offline;
     return `${botName} could not reach ${ownerName}'s computer (gateway HTTP ${response.status}). Try again later.`;
   }
-  const listed = (await response.json().catch(() => null)) as {
-    data?: Array<{ id?: unknown }>;
-  } | null;
-  if (!listed?.data?.some((model) => model.id === modelId)) {
-    return `${botName} uses ${modelId}, which ${ownerName}'s computer is not offering right now.`;
-  }
+  const listed = payload?.data?.find((model) => model.id === modelId);
+  if (!listed) return sharedLocalRefusalNotice("model_off", botName, ownerName, modelId);
+  ensureSharedLocalModel(
+    modelId,
+    typeof listed.context_window === "number" ? listed.context_window : undefined,
+  );
   return null;
 }
 

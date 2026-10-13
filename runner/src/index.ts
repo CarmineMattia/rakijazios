@@ -51,7 +51,7 @@ import { parseLoopbackBaseUrl } from "./loopback.ts";
 import { EXIT_REFUSED, PID_HEARTBEAT_MS, fileAgeMs, looksLikeRunner, otherRunnerHolding } from "./existing.ts";
 import { PairRefused, pairDevice, platformTag } from "./pair.ts";
 
-export const VERSION = "0.2.1-m2a";
+export const VERSION = "0.2.2-m2b";
 const SCRIPT = fileURLToPath(import.meta.url);
 
 function arg(argv: string[], name: string): string | undefined {

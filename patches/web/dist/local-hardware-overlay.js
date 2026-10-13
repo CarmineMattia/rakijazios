@@ -4,6 +4,9 @@
  * Windows .cmd with the code baked in), see computers online/offline, switch
  * models on/off, pause, give a new key, remove. Hidden unless the server sets
  * RAKAZO_LOCAL_RUNNERS_UI=1 (GET /api/local-runners/config).
+ * M2b: "Bots on my computer" — bind each of your bots to one computer + model
+ * (replaces the operator SQL). Lives here rather than in the bot panel, whose
+ * minified markup is too fragile to overlay.
  */
 (() => {
   if (!location.pathname.startsWith("/app")) return;
@@ -184,9 +187,20 @@
       note.textContent = `You can connect up to ${data.maxDevices} computers. Remove one to add another.`;
     }
     for (const d of data.devices) list.append(deviceCard(d));
-    listTimer = setTimeout(() => {
-      if (my === epoch && view.kind === "list" && settingsRoot()?.getAttribute("data-rk-hw") === "1") renderList();
-    }, 10_000);
+    const botsSection = el("div", "", { data: { rk: "hw-bots" } });
+    p.append(botsSection);
+    renderBots(botsSection, my).catch(() => {});
+    const refresh = () => {
+      if (my !== epoch || view.kind !== "list" || settingsRoot()?.getAttribute("data-rk-hw") !== "1") return;
+      // Do not redraw under the user's hands (an open picker or rename box).
+      const active = document.activeElement;
+      if (active && panel()?.contains(active) && /^(SELECT|INPUT)$/.test(active.tagName)) {
+        listTimer = setTimeout(refresh, 10_000);
+        return;
+      }
+      renderList();
+    };
+    listTimer = setTimeout(refresh, 10_000);
   }
 
   function deviceCard(d) {
@@ -303,6 +317,75 @@
     actions.append(pause, rotate, remove);
     card.append(actions);
     return card;
+  }
+
+  // ---------- M2b: bots on my computer ----------
+  async function renderBots(section, my) {
+    const [botsRes, offered] = await Promise.all([api("/bots"), api("/offered-models")]);
+    if (my !== epoch) return;
+    section.append(el("h3", "Bots on my computer", { attrs: { style: "margin:22px 0 4px;font-size:16px;font-weight:600" } }));
+    section.append(
+      el(
+        "p",
+        "Pick which computer and model a bot uses. Only models you switched on above are listed. A bot on your computer answers only you and groups that are not shared, never external channels.",
+        { className: "rk-hw-hint" },
+      ),
+    );
+    const choices = [];
+    for (const d of offered.devices) {
+      for (const m of d.models) {
+        choices.push({
+          value: `${d.id}|${m.id}`,
+          label: `${m.id} — ${d.name}${d.paused ? " (paused)" : d.online ? (m.availableNow ? "" : " (not available now)") : " (offline)"}`,
+          deviceId: d.id,
+          modelId: m.id,
+        });
+      }
+    }
+    if (!botsRes.bots.length) {
+      section.append(el("p", "You have no bots yet.", { className: "rk-hw-hint" }));
+      return;
+    }
+    for (const b of botsRes.bots) {
+      const line = el("div", "", { className: "rk-hw-model", data: { "rk-bot": b.id } });
+      const left = el("div", "", {});
+      left.append(el("span", b.name, { className: "rk-hw-name" }));
+      if (b.needsSetup) {
+        left.append(el("div", "Pick a computer for this bot; it can't answer until you do.", { className: "rk-hw-err", attrs: { style: "font-size:12.5px" } }));
+      }
+      const select = el("select", "", { attrs: { "aria-label": `Computer and model for ${b.name}` } });
+      select.append(el("option", "Not on my computer", { value: "" }));
+      const current = b.onMyComputer && b.deviceId && b.modelId ? `${b.deviceId}|${b.modelId}` : "";
+      for (const c of choices) select.append(el("option", c.label, { value: c.value }));
+      if (current && !choices.some((c) => c.value === current)) {
+        select.append(el("option", `${b.modelId} (switched off)`, { value: current, disabled: true }));
+      }
+      select.value = current;
+      if (b.onMyComputer && !current) {
+        select.prepend(el("option", "Choose…", { value: "__pick", disabled: true }));
+        select.value = "__pick";
+      }
+      const msg = el("span", "", { className: "rk-hw-hint", attrs: { role: "status" } });
+      select.addEventListener("change", async () => {
+        select.disabled = true;
+        msg.textContent = "Saving…";
+        try {
+          const pick = choices.find((c) => c.value === select.value);
+          await api(`/bots/${encodeURIComponent(b.id)}/model`, pick ? { deviceId: pick.deviceId, modelId: pick.modelId } : { clear: true });
+          msg.textContent = pick ? "Saved" : "Saved — uses the space default model again";
+          msg.className = "rk-hw-ok";
+        } catch (e) {
+          msg.textContent = e.message;
+          msg.className = "rk-hw-err";
+        } finally {
+          select.disabled = false;
+        }
+      });
+      const right = el("div", "", { className: "rk-hw-row" });
+      right.append(msg, select);
+      line.append(left, right);
+      section.append(line);
+    }
   }
 
   // ---------- add a computer ----------

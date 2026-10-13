@@ -6,6 +6,10 @@
  * M2a: several computers per owner (one live session per device), advertised
  * models stored in local_runner_models with an owner on/off switch, a per-device
  * pause switch, `policy` pushed on every change and `bye` on revoke/rotate.
+ * M2b: each shared-local bot is bound to one computer + model
+ * (local_runner_bot_bindings). The gateway takes a run-bound token and re-checks
+ * run, bot, binding, computer, model and group on every request, then routes to
+ * the bound computer only.
  */
 import { readdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -17,9 +21,12 @@ import type { Hono } from "hono";
 import {
   hashDeviceToken,
   sharedLocalModelIds,
-  verifySharedLocalToken,
+  verifySharedLocalRunToken,
 } from "./shared-local-token.js";
 import {
+  decideSharedLocalAccess,
+  type SharedLocalAccess,
+  type SharedLocalAccessRow,
   MAX_MODELS_PER_DEVICE,
   sanitizeAdvertisedModels,
   sanitizeShort,
@@ -63,7 +70,15 @@ function loadWs(): WsModule {
 }
 
 const HEARTBEAT_MISS_MS = 45_000;
-const HARD_TIMEOUT_MS = 10 * 60_000;
+/**
+ * M2b long runs: an answer may stream for up to HARD_TIMEOUT_MS as long as tokens
+ * keep coming; IDLE_TIMEOUT_MS without a single chunk ends it (model stuck or
+ * runner wedged). Big local models can take minutes before the first token.
+ */
+const HARD_TIMEOUT_MS = 30 * 60_000;
+const IDLE_TIMEOUT_MS = 5 * 60_000;
+/** How often in-flight answers are checked against their run (cancelled/finished runs stop). */
+const RUN_SWEEP_MS = 10_000;
 const MAX_IN_FLIGHT = 2;
 const OFFLINE_MESSAGE =
   "This bot runs on the owner's computer, which is offline right now. Try again later.";
@@ -86,6 +101,8 @@ const FAILED_HELLO_WINDOW_MS = 60_000;
 type PendingInfer = {
   id: string;
   ownerUserId: string;
+  runId: string;
+  lastChunkAt: number;
   chunks: string[];
   status?: number;
   error?: { message: string; retryable: boolean };
@@ -174,6 +191,19 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (device_id, model_id)
       )`);
+      // M2b (additive): which computer + model each shared-local bot runs on.
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_bot_bindings (
+        bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+        device_id TEXT NOT NULL REFERENCES local_runner_devices(id) ON DELETE CASCADE,
+        model_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      await prisma.$executeRawUnsafe(
+        `CREATE INDEX IF NOT EXISTS local_runner_bot_bindings_device_idx ON local_runner_bot_bindings (device_id)`,
+      );
+      await migrateM1Bindings(prisma);
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -181,6 +211,64 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
     ready.set(prisma, pending);
   }
   return pending;
+}
+
+/**
+ * M2b migration (idempotent, additive): an M1/M2a shared-local bot with no
+ * binding whose owner has exactly one active computer gets bound to it, and that
+ * model is switched on there, so bots like Chief Local keep working untouched.
+ * Owners with several computers pick one in the UI (the bot shows a notice).
+ */
+export async function migrateM1Bindings(prisma: PrismaClient): Promise<number> {
+  const bound = await prisma.$queryRawUnsafe<Array<{ device_id: string; model_id: string }>>(
+    `WITH single AS (
+       SELECT user_id, MIN(id) AS device_id FROM local_runner_devices
+       WHERE status = 'active' GROUP BY user_id HAVING COUNT(*) = 1
+     )
+     INSERT INTO local_runner_bot_bindings (bot_id, user_id, device_id, model_id)
+     SELECT b.id, b."userId", s.device_id, b."modelId"
+     FROM bots b JOIN single s ON s.user_id = b."userId"
+     WHERE b."modelProvider" = 'shared-local' AND b."modelId" IS NOT NULL AND b."modelId" <> ''
+       AND NOT EXISTS (SELECT 1 FROM local_runner_bot_bindings x WHERE x.bot_id = b.id)
+     ON CONFLICT (bot_id) DO NOTHING
+     RETURNING device_id, model_id`,
+  );
+  for (const row of bound) {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO local_runner_models (device_id, model_id, advertised, enabled)
+       VALUES ($1, $2, false, true)
+       ON CONFLICT (device_id, model_id) DO UPDATE SET enabled = true`,
+      row.device_id,
+      row.model_id,
+    );
+  }
+  return bound.length;
+}
+
+/** One row with everything the access rule needs; undefined = no such run. */
+export async function loadSharedLocalAccessRow(
+  prisma: PrismaClient,
+  runId: string,
+): Promise<SharedLocalAccessRow | undefined> {
+  const rows = await prisma.$queryRawUnsafe<SharedLocalAccessRow[]>(
+    `SELECT r."userId" AS run_user_id, r.status::text AS run_status, r.trigger::text AS run_trigger,
+            b."userId" AS bot_user_id, b."modelProvider" AS bot_model_provider, b."modelId" AS bot_model_id,
+            (b."archivedAt" IS NOT NULL) AS bot_archived,
+            t."groupId" AS thread_group_id, (t."externalConversationId" IS NOT NULL) AS thread_external,
+            (SELECT COUNT(*)::int FROM group_shares gs WHERE gs.group_id = t."groupId") AS group_share_count,
+            bb.device_id AS bind_device_id, bb.model_id AS bind_model_id,
+            d.user_id AS device_user_id, d.status AS device_status, d.enabled AS device_enabled,
+            m.enabled AS model_enabled, m.advertised AS model_advertised, m.context_window AS model_context_window
+       FROM runs r
+       JOIN bots b ON b.id = r."botId"
+       LEFT JOIN threads t ON t.id = r."threadId"
+       LEFT JOIN local_runner_bot_bindings bb ON bb.bot_id = b.id
+       LEFT JOIN local_runner_devices d ON d.id = bb.device_id
+       LEFT JOIN local_runner_models m ON m.device_id = bb.device_id AND m.model_id = bb.model_id
+      WHERE r.id = $1`,
+    runId,
+  );
+  return rows[0];
 }
 
 /** Seed a device for a user. Returns plaintext token once (caller must store securely). */
@@ -220,6 +308,8 @@ export type LocalRunnerGateway = {
   refreshDevice: (deviceId: string) => Promise<void>;
   /** M2a: send `bye{reason}` and drop the live session (revoke / rotate / re-pair). */
   disconnectDevice: (deviceId: string, reason: string) => void;
+  /** M2b: models this computer can serve right now (advertised live AND switched on). */
+  offeredModels: (deviceId: string) => string[];
 };
 
 /**
@@ -521,6 +611,7 @@ export function createLocalRunnerGateway(deps: {
           const dataLine = typeof frame.data === "string" ? frame.data : "";
           const p = pending.get(id);
           if (p && !p.done && session.inFlight.has(id)) {
+            p.lastChunkAt = Date.now();
             p.chunks.push(dataLine);
             wake(p);
           }
@@ -574,32 +665,110 @@ export function createLocalRunnerGateway(deps: {
     return out;
   }
 
-  /** Models an owner can use right now: advertised and switched on, on any live computer. */
-  function ownerModels(ownerUserId: string): string[] {
-    const ids = new Set<string>();
-    for (const session of ownerSessions(ownerUserId)) {
-      for (const id of session.offeredModels) if (session.allowedModels.has(id)) ids.add(id);
+  /**
+   * M2b: the bound computer's live session, if it is online, not paused and
+   * offers the model right now. `busy` = online but already at MAX_IN_FLIGHT.
+   */
+  function deviceSession(deviceId: string, model: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
+    const session = sessionsByDevice.get(deviceId);
+    if (!session) return undefined;
+    if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
+      dropSession(session, "stale");
+      return undefined;
     }
-    return [...ids].sort();
+    if (!session.enabled) return "paused";
+    if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
+    return session.inFlight.size < MAX_IN_FLIGHT ? session : "busy";
   }
 
-  /**
-   * Pick a computer for this model (M2a, until M2b binds bots to one computer):
-   * the least busy live session that offers it. `busy` = offered but all full.
-   */
-  function pickSession(ownerUserId: string, model: string): RunnerSession | "busy" | undefined {
-    const offering = ownerSessions(ownerUserId).filter(
-      (s) => s.allowedModels.has(model) && s.offeredModels.includes(model),
-    );
-    if (!offering.length) return undefined;
-    const free = offering
-      .filter((s) => s.inFlight.size < MAX_IN_FLIGHT)
-      .sort((a, b) => a.inFlight.size - b.inFlight.size);
-    return free[0] ?? "busy";
+  function liveError(kind: "busy" | "paused" | "no_model" | undefined): Response {
+    if (kind === "busy") {
+      return Response.json(
+        { error: { message: "[shared_local_busy] Owner's local runner is busy. Try again shortly.", type: "shared_local_busy" } },
+        { status: 429 },
+      );
+    }
+    if (kind === "paused") {
+      return Response.json(
+        { error: { message: "[shared_local_paused] The owner's computer is paused.", type: "shared_local_paused" } },
+        { status: 503 },
+      );
+    }
+    if (kind === "no_model") {
+      return Response.json(
+        {
+          error: {
+            message: "[shared_local_model_off] The owner's computer doesn't offer this model right now.",
+            type: "shared_local_model_off",
+          },
+        },
+        { status: 403 },
+      );
+    }
+    return Response.json({ error: { message: OFFLINE_MESSAGE, type: "shared_local_offline" } }, { status: 503 });
+  }
+
+  /** Token signature + a fresh database check of the run and everything it touches. */
+  async function authorize(header: string, requestedModel?: string): Promise<
+    | { ok: true; ownerUserId: string; runId: string; access: Extract<SharedLocalAccess, { ok: true }> }
+    | { ok: false; response: Response }
+  > {
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const verified = token ? verifySharedLocalRunToken(token) : null;
+    if (!verified) {
+      return { ok: false, response: Response.json({ error: { message: "Unauthorized", type: "shared_local_unauthorized" } }, { status: 401 }) };
+    }
+    await ensureLocalRunnerTables(deps.prisma);
+    const row = await loadSharedLocalAccessRow(deps.prisma, verified.runId);
+    const access = decideSharedLocalAccess(verified.ownerUserId, row, requestedModel);
+    if (!access.ok) {
+      return {
+        ok: false,
+        response: Response.json({ error: { message: access.message, type: access.type } }, { status: access.status }),
+      };
+    }
+    return { ok: true, ownerUserId: verified.ownerUserId, runId: verified.runId, access };
+  }
+
+  // Answers whose run has finished or been cancelled stop at once: the token is
+  // only as alive as its run, including mid-stream.
+  setInterval(() => {
+    const live = [...pending.values()].filter((p) => !p.done);
+    const now = Date.now();
+    for (const p of live) {
+      if (now - p.lastChunkAt > IDLE_TIMEOUT_MS) cancelPending(p.id, "Inference idle timeout (no tokens for 5 min)");
+    }
+    const runIds = [...new Set(live.map((p) => p.runId))];
+    if (!runIds.length) return;
+    void deps.prisma
+      .$queryRawUnsafe<Array<{ id: string }>>(
+        `SELECT id FROM runs WHERE id = ANY($1::text[]) AND status::text IN ('leased', 'running')`,
+        runIds,
+      )
+      .then((rows) => {
+        const alive = new Set(rows.map((r) => r.id));
+        for (const p of live) if (!alive.has(p.runId)) cancelPending(p.id, "[shared_local_run_ended] This run has ended.");
+      })
+      .catch(() => undefined);
+  }, RUN_SWEEP_MS).unref?.();
+
+  function cancelPending(id: string, message: string): void {
+    for (const session of sessionsByDevice.values()) {
+      if (!session.inFlight.has(id)) continue;
+      try {
+        session.ws.send(JSON.stringify({ type: "infer.cancel", id }));
+      } catch {
+        /* ignore */
+      }
+      session.inFlight.delete(id);
+    }
+    failPending(id, message, false);
   }
 
   async function proxyChatCompletions(
     ownerUserId: string,
+    runId: string,
+    deviceId: string,
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
@@ -607,35 +776,22 @@ export function createLocalRunnerGateway(deps: {
     if (!model) {
       return Response.json({ error: { message: "model is required" } }, { status: 400 });
     }
-    const picked = pickSession(ownerUserId, model);
-    if (!picked) {
-      return Response.json(
-        { error: { message: OFFLINE_MESSAGE, type: "shared_local_offline" } },
-        { status: 503 },
-      );
-    }
-    if (picked === "busy") {
-      return Response.json(
-        {
-          error: {
-            message: "Owner's local runner is busy. Try again shortly.",
-            type: "shared_local_busy",
-          },
-        },
-        { status: 429 },
-      );
-    }
+    const picked = deviceSession(deviceId, model);
+    if (!picked || typeof picked === "string") return liveError(picked);
+    if (picked.userId !== ownerUserId) return liveError(undefined);
     const session = picked;
 
     const id = randomUUID();
     const p: PendingInfer = {
       id,
       ownerUserId,
+      runId,
+      lastChunkAt: Date.now(),
       chunks: [],
       done: false,
       waiters: [],
       hardTimer: setTimeout(() => {
-        failPending(id, "Inference hard timeout (10 min)", false);
+        failPending(id, "Inference hard timeout (30 min)", false);
         try {
           session.ws.send(JSON.stringify({ type: "infer.cancel", id }));
         } catch {
@@ -785,6 +941,11 @@ export function createLocalRunnerGateway(deps: {
       }
       sendPolicy(session);
     },
+    offeredModels(deviceId: string): string[] {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return [];
+      return session.offeredModels.filter((id) => session.allowedModels.has(id)).sort();
+    },
     disconnectDevice(deviceId: string, reason: string) {
       const session = sessionsByDevice.get(deviceId);
       if (!session) return;
@@ -796,36 +957,37 @@ export function createLocalRunnerGateway(deps: {
       dropSession(session, reason, 4001);
     },
     mountHttp(app: Hono) {
+      // M2b: `/models` lists only the bound model of the run's bot, and only when
+      // the bound computer can serve it right now. Refusals carry a typed error.
       app.get("/api/local-runners/v1/models", async (c) => {
-        const auth = c.req.header("authorization") ?? "";
-        const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-        const verified = token ? verifySharedLocalToken(token) : null;
-        if (!verified) return c.json({ error: "Unauthorized" }, 401);
-        if (!ownerSessions(verified.ownerUserId).length) {
-          return c.json({ error: { message: OFFLINE_MESSAGE } }, 503);
-        }
+        const auth = await authorize(c.req.header("authorization") ?? "");
+        if (!auth.ok) return auth.response;
+        const live = deviceSession(auth.access.deviceId, auth.access.modelId);
+        if (!live || live === "paused" || live === "no_model") return liveError(live);
         return c.json({
           object: "list",
-          data: ownerModels(verified.ownerUserId).map((id) => ({
-            id,
-            object: "model",
-            owned_by: "shared-local",
-          })),
+          data: [
+            {
+              id: auth.access.modelId,
+              object: "model",
+              owned_by: "shared-local",
+              context_window: auth.access.contextWindow,
+            },
+          ],
         });
       });
 
       app.post("/api/local-runners/v1/chat/completions", async (c) => {
-        const auth = c.req.header("authorization") ?? "";
-        const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-        const verified = token ? verifySharedLocalToken(token) : null;
-        if (!verified) return c.json({ error: "Unauthorized" }, 401);
         let body: Record<string, unknown>;
         try {
           body = (await c.req.json()) as Record<string, unknown>;
         } catch {
           return c.json({ error: "Invalid JSON" }, 400);
         }
-        return proxyChatCompletions(verified.ownerUserId, body, c.req.raw.signal);
+        const model = typeof body.model === "string" ? body.model : "";
+        const auth = await authorize(c.req.header("authorization") ?? "", model || undefined);
+        if (!auth.ok) return auth.response;
+        return proxyChatCompletions(auth.ownerUserId, auth.runId, auth.access.deviceId, body, c.req.raw.signal);
       });
     },
     attachUpgrade(server: HttpServer) {

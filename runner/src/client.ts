@@ -32,12 +32,27 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const DISCOVERY_MS = 60_000;
 const MAX_UNAUTHORIZED = 3;
+/** M2b: no frame at all from the server for this long = dead link (half-open TCP, NAT drop). */
+const SERVER_SILENCE_MS = 50_000;
+/** M2b: socket open + hello accepted (first policy) must happen within this. */
+const CONNECT_TIMEOUT_MS = 20_000;
+
+/**
+ * Exponential backoff with jitter (50-100% of the step), so many runners do not
+ * reconnect in lock-step after a server restart.
+ */
+export function reconnectDelay(attempt: number, random: () => number = Math.random): number {
+  const step = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 16));
+  return Math.round(step * (0.5 + 0.5 * random()));
+}
 
 export class LocalRunnerClient {
   private ws: WebSocket | null = null;
   private stopped = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastServerFrameAt = 0;
   private readonly inFlight = new Map<string, AbortController>();
   private readonly log: (line: string) => void;
   private readonly opts: RunnerOptions;
@@ -134,6 +149,8 @@ export class LocalRunnerClient {
     this.discoveryTimer = null;
     if (writeStatus) this.status("stopped");
     this.clearHeartbeat();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     for (const [, ctrl] of this.inFlight) ctrl.abort();
     this.inFlight.clear();
     try {
@@ -152,7 +169,14 @@ export class LocalRunnerClient {
     this.ws = ws;
 
     this.status("connecting");
+    // A black-holed connect or an unanswered hello would otherwise sit in
+    // "connecting" forever; give up and back off instead.
+    const connectTimer = setTimeout(() => {
+      if (!this.connected && this.ws === ws) teardown("connect timeout");
+    }, CONNECT_TIMEOUT_MS);
+    connectTimer.unref?.();
     ws.addEventListener("open", () => {
+      this.lastServerFrameAt = Date.now();
       // The backoff resets only once the server accepts the hello (first policy).
       this.log("connected; sending hello");
       // The device token goes in the first frame, never in the URL.
@@ -168,11 +192,18 @@ export class LocalRunnerClient {
       // The detailed models frame follows the first policy (hello accepted).
       this.clearHeartbeat();
       this.heartbeatTimer = setInterval(() => {
+        // The server acks every heartbeat; silence means the link is dead even
+        // if the OS has not noticed yet. Reconnect instead of waiting forever.
+        if (Date.now() - this.lastServerFrameAt > SERVER_SILENCE_MS) {
+          teardown("server silent; reconnecting");
+          return;
+        }
         this.send({ type: "heartbeat", at: Date.now() });
       }, HEARTBEAT_MS);
     });
 
     ws.addEventListener("message", (ev) => {
+      if (this.ws === ws) this.lastServerFrameAt = Date.now();
       void this.onMessage(String(ev.data));
     });
 
@@ -182,6 +213,16 @@ export class LocalRunnerClient {
     const teardown = (why: string) => {
       if (tornDown) return;
       tornDown = true;
+      clearTimeout(connectTimer);
+      if (this.ws !== ws && this.ws !== null) {
+        // A newer socket already took over; only tidy this one.
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       this.connected = false;
       this.clearHeartbeat();
       this.log(why);
@@ -217,14 +258,14 @@ export class LocalRunnerClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped) return;
-    const delay = Math.min(
-      RECONNECT_MAX_MS,
-      RECONNECT_BASE_MS * 2 ** this.reconnectAttempt,
-    );
+    if (this.stopped || this.reconnectTimer) return;
+    const delay = reconnectDelay(this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.log(`reconnect in ${delay}ms`);
-    setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
   }
 
   private clearHeartbeat(): void {
