@@ -340,13 +340,6 @@ Items below are **planned, not done**.
     (tools, computer access, memory and credentials)?
   - What happens to existing chats/groups using a bot when its owner unpublishes or changes it?
 
-### Model advisor (after M2)
-
-- [ ] **"What can my computer run?"**: the runner detects the hardware (opt-in, coarse), the server
-      recommends up-to-date GGUF models from a curated Hugging Face catalog with fit tiers, one-click
-      verified install, plus an optional small planner/router model. Proposal:
-      [`docs/model-advisor.md`](docs/model-advisor.md).
-
 ### Device node app (M5, long-term)
 
 - [ ] An installable **Rakijazios app** for Linux/Windows/macOS (desktop) and Android/iOS: chat client
