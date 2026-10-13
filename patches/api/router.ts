@@ -477,6 +477,28 @@ function mapSpaceLifecycleError(error: unknown): unknown {
   return error;
 }
 
+/**
+ * Rakijazios: spaces can have several members (space invites), but `bots.spawnKey` is unique
+ * per space. When a second member's onboarding sends `spawnKey: "onboarding:first"` and the
+ * owner's first bot already holds it, upstream createBot rethrows the conflict and the member
+ * lands on /onboarding with "Internal server error". Scope the key to the member instead, so
+ * their own first bot is created once and the call stays idempotent for them.
+ */
+export async function memberScopedSpawnKey<T extends { spawnKey?: string }>(
+  prisma: { bot: { findUnique: (args: any) => Promise<{ userId: string } | null> } },
+  actor: { spaceId: string; userId: string },
+  input: T,
+): Promise<T> {
+  if (!input.spawnKey) return input;
+  const holder = await prisma.bot.findUnique({
+    where: { spaceId_spawnKey: { spaceId: actor.spaceId, spawnKey: input.spawnKey } },
+    select: { userId: true },
+  });
+  if (!holder || holder.userId === actor.userId) return input;
+  const scoped = `${input.spawnKey}@${actor.userId}`;
+  return { ...input, spawnKey: scoped.length <= 120 ? scoped : `${input.spawnKey.slice(0, 80)}@${actor.userId}`.slice(0, 120) };
+}
+
 export function createRouter(deps: RouterDeps) {
   const os = implement(appContract).$context<{ actor: Actor | null; signal?: AbortSignal }>();
   const repos = createRepos(deps.prisma);
@@ -1012,7 +1034,7 @@ export function createRouter(deps: RouterDeps) {
       }),
       create: authed.bots.create.handler(async ({ context, input }) => {
         try {
-          return await repos.createBot(context.actor, input);
+          return await repos.createBot(context.actor, await memberScopedSpawnKey(deps.prisma, context.actor, input));
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }

@@ -123,6 +123,7 @@ export class FailureLimiter {
 // ---------------------------------------------------------------------------
 
 export type SharedLocalAccessRow = {
+  bot_id: string;
   run_user_id: string;
   run_status: string;
   run_trigger: string;
@@ -131,8 +132,12 @@ export type SharedLocalAccessRow = {
   bot_model_id: string | null;
   bot_archived: boolean;
   thread_group_id: string | null;
+  /** The bot whose 1:1 thread this is (null for group threads). */
+  thread_bot_id: string | null;
   thread_external: boolean;
   group_share_count: number;
+  /** M2c: a grant (bot, group) by the owner of both exists. */
+  group_granted: boolean;
   bind_device_id: string | null;
   bind_model_id: string | null;
   device_user_id: string | null;
@@ -150,10 +155,18 @@ export type SharedLocalDenyType =
   | "shared_local_paused"
   | "shared_local_model_off"
   | "shared_local_group_denied"
+  | "shared_local_thread_denied"
   | "shared_local_external_denied";
 
 export type SharedLocalAccess =
-  | { ok: true; deviceId: string; modelId: string; contextWindow: number | null }
+  | {
+      ok: true;
+      deviceId: string;
+      modelId: string;
+      contextWindow: number | null;
+      botId: string;
+      groupId: string | null;
+    }
   | { ok: false; status: number; type: SharedLocalDenyType; message: string };
 
 /** Triggers that answer outside Rakazo chat (bridged channels, inbound webhooks). */
@@ -178,9 +191,14 @@ export function decideSharedLocalAccess(
   if (row.thread_external || EXTERNAL_TRIGGERS.has(row.run_trigger)) {
     return deny(403, "shared_local_external_denied", "Bots on a personal computer don't answer in external channels.");
   }
-  if (row.thread_group_id && row.group_share_count > 0) {
-    // M2c adds per-group grants; until then shared groups are refused up front.
-    return deny(403, "shared_local_group_denied", "This bot runs on its owner's computer and isn't enabled for this shared group.");
+  // M2c (plan §6, fails closed): the bot's own 1:1 chat; a group nobody else can see;
+  // or a shared group the owner granted this bot. Anything else is refused.
+  if (row.thread_group_id) {
+    if (row.group_share_count > 0 && !row.group_granted) {
+      return deny(403, "shared_local_group_denied", "This bot runs on its owner's computer and isn't enabled for this shared group.");
+    }
+  } else if (row.thread_bot_id !== row.bot_id) {
+    return deny(403, "shared_local_thread_denied", "This bot only answers in its owner's chats and groups.");
   }
   if (!row.bind_device_id || !row.bind_model_id) {
     return deny(403, "shared_local_unbound", "This bot isn't connected to a computer yet.");
@@ -200,5 +218,12 @@ export function decideSharedLocalAccess(
   if (!row.model_advertised) {
     return deny(403, "shared_local_model_off", "The owner's computer doesn't offer this model right now.");
   }
-  return { ok: true, deviceId: row.bind_device_id, modelId: row.bind_model_id, contextWindow: row.model_context_window };
+  return {
+    ok: true,
+    deviceId: row.bind_device_id,
+    modelId: row.bind_model_id,
+    contextWindow: row.model_context_window,
+    botId: row.bot_id,
+    groupId: row.thread_group_id,
+  };
 }

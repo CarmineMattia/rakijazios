@@ -4694,7 +4694,7 @@ export function classifySharedLocalFailure(rawMessage: string): "busy" | "offlin
 }
 
 /** M2b: typed gateway refusals (`[shared_local_<kind>] …`) that are not plain drops. */
-const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|external_denied|unbound|removed|run_ended)\b/i;
+const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|thread_denied|external_denied|unbound|removed|run_ended)\b/i;
 
 export function sharedLocalRefusalKind(rawMessage: string): string | null {
   return SHARED_LOCAL_TYPED.exec(rawMessage)?.[1]?.toLowerCase() ?? null;
@@ -4714,6 +4714,8 @@ export function sharedLocalRefusalNotice(
       return `${botName} uses ${modelId}, which is switched off or not available on ${ownerName}'s computer right now.`;
     case "group_denied":
       return `${botName} runs on ${ownerName}'s computer and isn't enabled for this shared group.`;
+    case "thread_denied":
+      return `${botName} runs on ${ownerName}'s computer and only answers in ${ownerName}'s own chats and groups.`;
     case "external_denied":
       return `${botName} runs on ${ownerName}'s computer, so it doesn't answer in external channels.`;
     case "removed":

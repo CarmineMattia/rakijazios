@@ -29,6 +29,7 @@ describe("shared-local refusals (M2b)", () => {
     expect(sharedLocalRefusalKind('403 [shared_local_group_denied] This bot runs…')).toBe("group_denied");
     expect(sharedLocalRefusalKind("shared_local_external_denied")).toBe("external_denied");
     expect(sharedLocalRefusalKind("[shared_local_run_ended] This run has ended.")).toBe("run_ended");
+    expect(sharedLocalRefusalKind("[shared_local_thread_denied] x")).toBe("thread_denied");
     expect(sharedLocalRefusalKind("shared_local_offline")).toBeNull();
     expect(sharedLocalRefusalKind("shared_local_busy")).toBeNull();
     expect(sharedLocalRefusalNotice("group_denied", "Chief", "Carmine", "m")).toBe(

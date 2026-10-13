@@ -615,6 +615,122 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     }),
   );
 
+  // ---- M2c: group grants (owner of the group AND the bot) + transparency ----
+  async function ownedGroup(uid: string, groupId: string): Promise<{ id: string }> {
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+      `SELECT id FROM chat_groups WHERE id = $1 AND "userId" = $2 AND "archivedAt" IS NULL`,
+      groupId.slice(0, 64),
+      uid,
+    );
+    if (!rows[0]) throw new HttpError(404, "Not found");
+    return rows[0];
+  }
+
+  type GroupBotRow = {
+    bot_id: string;
+    name: string;
+    owner_user_id: string;
+    owner_name: string | null;
+    device_id: string | null;
+    granted: boolean;
+  };
+
+  /** Bots of this group that run on their owner's computer. */
+  async function groupLocalBots(groupId: string): Promise<GroupBotRow[]> {
+    return prisma.$queryRawUnsafe<GroupBotRow[]>(
+      `SELECT b.id AS bot_id, b.name, b."userId" AS owner_user_id, u.name AS owner_name, bb.device_id,
+              EXISTS (SELECT 1 FROM local_runner_grants g
+                       WHERE g.bot_id = b.id AND g.group_id = cg.id AND g.owner_user_id = cg."userId") AS granted
+         FROM chat_groups cg
+         JOIN chat_group_members m ON m."groupId" = cg.id
+         JOIN bots b ON b.id = m."botId" AND b."archivedAt" IS NULL
+         JOIN "user" u ON u.id = b."userId"
+         LEFT JOIN local_runner_bot_bindings bb ON bb.bot_id = b.id
+        WHERE cg.id = $1 AND b."modelProvider" = 'shared-local' AND b."userId" = cg."userId"
+        ORDER BY b.name`,
+      groupId,
+    );
+  }
+
+  app.get(
+    "/api/local-runners/groups/:groupId/grants",
+    route(async (c) => {
+      const uid = await userId(c);
+      const group = await ownedGroup(uid, c.req.param("groupId")!);
+      const shares = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+        `SELECT COUNT(*)::int AS n FROM group_shares WHERE group_id = $1`,
+        group.id,
+      );
+      const bots = await groupLocalBots(group.id);
+      return c.json({
+        shared: (shares[0]?.n ?? 0) > 0,
+        bots: bots.map((b) => ({ botId: b.bot_id, name: b.name, granted: b.granted, online: b.device_id ? gateway.deviceInfo(b.device_id).online : false })),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/local-runners/groups/:groupId/grants",
+    route(async (c) => {
+      const uid = await userId(c);
+      const group = await ownedGroup(uid, c.req.param("groupId")!);
+      const body = await readBody(c);
+      const botId = typeof body.botId === "string" ? body.botId.slice(0, 64) : "";
+      if (typeof body.allowed !== "boolean" || !botId) throw new HttpError(400, "botId and allowed are required");
+      const bot = (await groupLocalBots(group.id)).find((b) => b.bot_id === botId);
+      if (!bot) throw new HttpError(404, "Not found");
+      let cancelled = 0;
+      if (body.allowed) {
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO local_runner_grants (bot_id, group_id, owner_user_id) VALUES ($1, $2, $3)
+           ON CONFLICT (bot_id, group_id) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id`,
+          bot.bot_id,
+          group.id,
+          uid,
+        );
+      } else {
+        await prisma.$executeRawUnsafe(
+          `DELETE FROM local_runner_grants WHERE bot_id = $1 AND group_id = $2`,
+          bot.bot_id,
+          group.id,
+        );
+        // Takes effect at once: answers in progress stop, and the gateway refuses the next turn.
+        cancelled = gateway.cancelBotInGroup(bot.bot_id, group.id);
+      }
+      return c.json({ botId: bot.bot_id, granted: body.allowed, cancelled });
+    }),
+  );
+
+  /**
+   * Members' view: which bots in this group run on someone's computer, and whether it is
+   * online. Owner name only — never device names, hostnames or addresses.
+   */
+  app.get(
+    "/api/local-runners/groups/:groupId/runs-on",
+    route(async (c) => {
+      const uid = await userId(c);
+      const groupId = c.req.param("groupId")!.slice(0, 64);
+      const access = await prisma.$queryRawUnsafe<Array<{ ok: boolean }>>(
+        `SELECT TRUE AS ok FROM chat_groups cg
+          WHERE cg.id = $1 AND cg."archivedAt" IS NULL
+            AND (cg."userId" = $2 OR EXISTS (SELECT 1 FROM group_shares s WHERE s.group_id = cg.id AND s.user_id = $2))`,
+        groupId,
+        uid,
+      );
+      if (!access[0]) throw new HttpError(404, "Not found");
+      const bots = await groupLocalBots(groupId);
+      return c.json({
+        bots: bots.map((b) => ({
+          botId: b.bot_id,
+          name: b.name,
+          runsOn: `${b.owner_name?.trim() || "its owner"}'s computer`,
+          online: b.device_id ? gateway.deviceInfo(b.device_id).online : false,
+          enabledHere: b.granted,
+        })),
+      });
+    }),
+  );
+
   function parseDeviceCredentials(raw: unknown): { deviceId: string; token: string } | null {
     if (!raw || typeof raw !== "object") return null;
     const r = raw as { deviceId?: unknown; token?: unknown };

@@ -3,7 +3,7 @@
 Status: **approved 2026-10-08** with the four recommended decisions (§11) and one change:
 pairing is **OS-aware and as automatic as possible** (§1.1). **M2a is implemented** on
 `feat/share-local-ai-m2a` (see §12). **M2b is implemented** on `feat/share-local-ai-m2b`
-(see §13). M2c is still plan.
+(see §13). **M2c is implemented** on `feat/share-local-ai-m2c` (see §14).
 Base: `main` @ `7637aad` (PR #6, M1). Design: [`share-local-ai.md`](share-local-ai.md) §5–§10.
 Scope: M2 only. Usage limits and accounting stay in M3; the marketplace is M4.
 
@@ -529,3 +529,60 @@ gateway then refuses the old binding. `bots.update` in `router.ts` was not chang
 - that another account can't bind or list the bot;
 - that unbinding works;
 - 0 secrets in the logs.
+
+## 14. M2c as built (2026-10-13)
+
+Branch `feat/share-local-ai-m2c`, stacked on M2b. Live on Host-001 since 2026-10-13 03:49 CEST
+(backup `.backups/m2c-20261013-034859`).
+
+**Grants.** `local_runner_grants(bot_id → bots ON DELETE CASCADE, group_id → chat_groups ON
+DELETE CASCADE, owner_user_id → user ON DELETE CASCADE, created_at, PK (bot_id, group_id))`,
+additive and created by `ensureLocalRunnerTables`.
+
+**Rule** (§6, fails closed; it is checked by the gateway on every request):
+- **The bot's own 1:1 thread** (`thread.botId = run.botId`): allowed.
+- **A group thread:**
+  - nobody else can see the group (no `group_shares`): allowed;
+  - shared, with a grant row whose `owner_user_id` is the run owner AND the group's owner
+    (group not archived): allowed;
+  - otherwise: `shared_local_group_denied`.
+- **External** (an external conversation, or a `messaging`/`webhook` trigger): denied first.
+- **Any other thread:** `shared_local_thread_denied` ("only answers in {owner}'s own chats and
+  groups").
+
+Guests' group messages create runs owned by the bot owner, so the same rule covers guests,
+@mentions and handoffs. Unsharing a group makes it owner-only again; its grants are kept.
+
+**Endpoints:**
+- `GET /api/local-runners/groups/:groupId/grants` (group owner): the group's bots that run on the
+  owner's computer, with `granted`, `online` and `shared`.
+- `POST /api/local-runners/groups/:groupId/grants {botId, allowed}` (group owner, and the bot must
+  be the owner's shared-local bot in this group): grant or revoke. A revoke cancels that bot's
+  in-flight answers in that group at once (`cancelled` count), and the gateway refuses the next
+  turn.
+- `GET /api/local-runners/groups/:groupId/runs-on` (group owner or a person the group is shared
+  with): `{botId, name, runsOn: "<owner>'s computer", online, enabledHere}`. Never device names,
+  hostnames or addresses.
+- Other accounts get 404; anonymous requests get 401.
+
+**UI** (`group-sharing-overlay.js`):
+- **Manage sharing** adds "Bots on your computer", with **Allow / Turn off** per bot. Each toggle
+  says "Let {bot} answer for people in this group" and carries the disclosure "Their messages in
+  this group will be sent to the model on your computer."
+- A warning lists the bots that won't answer people until allowed.
+- The group conversation shows "{bot} runs on {owner}'s computer", plus "(offline)" and "· not
+  enabled here" when they apply.
+
+The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant now controls it.
+
+**Tests.**
+- api and adapters tsc pass. vitest: 34 pass, 1 skipped (new grant and thread cases).
+- `e2e/m2b/61-m2c-grants.mjs`: 20/20. It checks:
+  - no grant → notice;
+  - grant through the real Share dialog → the group answers;
+  - revoke during a long answer → stream cancelled (`cancelled: 1`) with the notice;
+  - the next message is refused, and the private chat still works;
+  - qa2 sees the badge without device details;
+  - qa2 can't list or set grants (404); anonymous gets 401;
+  - 0 secrets in the logs.
+- The M2b e2e (`60`) still passes 20/20.
