@@ -22,8 +22,14 @@ const BOT = sql(`select id from bots where "userId"='${qaId}' and name='QA Teste
 const GROUP = sql(`select id from chat_groups where "userId"='${qaId}' and name='QA Group' limit 1`);
 if (!BOT) throw new Error('QA Tester Bot not found');
 const original = sql(`select coalesce("modelProvider",'')||'|'||coalesce("modelId",'') from bots where id='${BOT}'`);
-const cleanupDb = () => { sql(`delete from local_runner_devices where user_id='${qaId}'`); sql(`delete from local_runner_pairings where user_id='${qaId}'`); };
-cleanupDb();
+// Only what this script creates is removed: its own pairing and the computer that pairing made.
+// Other computers of the QA account (e.g. the tester's) are never touched.
+const created = { pairingId: null, devId: null };
+const cleanupDb = () => {
+  if (created.devId) sql(`delete from local_runner_devices where id='${q(created.devId)}' and user_id='${qaId}'`);
+  if (created.pairingId) sql(`delete from local_runner_pairings where id='${q(created.pairingId)}' and user_id='${qaId}'`);
+};
+const devicesBefore = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));
 
 const browser = await launch('qa-m2b');
 const page = await browser.newPage();
@@ -37,17 +43,20 @@ try {
   // ---------- pair a throwaway runner ----------
   const pairing = await api(page, '/api/local-runners/pairings', { method: 'POST', body: JSON.stringify({ os: 'linux' }) });
   const cmd = pairing.body?.commands?.unixNoAutostart; secrets.push(pairing.body?.code);
+  created.pairingId = pairing.body?.pairingId || null;
   const r = spawnSync('sh', ['-c', cmd], { env: env(), encoding: 'utf8', timeout: 240000 });
   fs.writeFileSync(T + '/install.log', (r.stdout || '') + (r.stderr || ''));
   eq('install_exit', r.status, 0);
   try { secrets.push(JSON.parse(fs.readFileSync(T + '/cfg/credentials.json', 'utf8')).token); } catch {}
-  const devId = await waitFor(() => sql(`select id from local_runner_devices where user_id='${qaId}' and status='active'`) || null, 30000);
+  const devId = await waitFor(() => sql(`select result_device_id from local_runner_pairings where id='${q(created.pairingId)}' and result_device_id is not null`) || null, 30000);
+  created.devId = devId;
+  ok('newDeviceOnly', { isNew: !!devId && !devicesBefore.has(devId), othersKept: devicesBefore.size }, !!devId && !devicesBefore.has(devId));
   const online = await waitFor(async () => { const d = await api(page, '/api/local-runners/devices'); return d.body?.devices?.find((x) => x.id === devId && x.online && x.models.length) || null; }, 90000);
   ok('runnerOnlineWithModels', { online: !!online, version: online?.runnerVersion, models: online?.models?.length }, !!online && /m2b/.test(online?.runnerVersion || ''));
   const want = process.env.RK_M2B_MODEL || (online.models.find((m) => m.id === 'qwen2.5:3b') ? 'qwen2.5:3b' : online.models[0].id);
   // ---------- UI: Bots on my computer ----------
   const before = await api(page, '/api/local-runners/offered-models');
-  eq('offeredEmptyBeforeSwitchOn', before.body.devices.length, 0);
+  eq('offeredEmptyBeforeSwitchOn', before.body.devices.some((d) => d.id === devId), false);
   await api(page, `/api/local-runners/devices/${devId}/models`, { method: 'POST', body: JSON.stringify({ modelId: want, enabled: true }) });
   const refused = await api(page, `/api/local-runners/bots/${BOT}/model`, { method: 'POST', body: JSON.stringify({ deviceId: devId, modelId: 'not-switched-on' }) });
   eq('bindRefusedForModelSwitchedOff', refused.status, 409);
@@ -118,6 +127,8 @@ try {
   sql(`update bots set "modelProvider"=${p ? `'${q(p)}'` : 'null'}, "modelId"=${m ? `'${q(m)}'` : 'null'} where id='${BOT}'`);
   sql(`delete from local_runner_bot_bindings where bot_id='${BOT}'`);
   cleanupDb();
+  const left = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));
+  ok('otherDevicesUntouched', { before: devicesBefore.size, missing: [...devicesBefore].filter((id) => !left.has(id)).length, oursGone: !created.devId || !left.has(created.devId) }, [...devicesBefore].every((id) => left.has(id)) && (!created.devId || !left.has(created.devId)));
   await browser.close();
   const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, `rakazo-${s}-1`], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n')
     + (fs.existsSync(T + '/cfg/runner.log') ? fs.readFileSync(T + '/cfg/runner.log', 'utf8') : '');
