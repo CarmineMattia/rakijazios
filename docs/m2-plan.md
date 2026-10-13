@@ -625,3 +625,11 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
 - Refusals: `person_cap` → "…and your limit for today is used up. Try again tomorrow." (usage row `refused_person_cap`); token cap → the existing `daily_cap` notice.
 - UI: two new fields in the Limits section; the summary shows `N/day per person` and `N tokens/day`.
 - Tests: `m3-limits.test.ts` (M3b caps), executor notice test; e2e `65-m3b-caps.mjs`.
+
+## 19. M3b(c): usage retention
+
+- Raw `local_runner_usage` rows older than `RK_LOCAL_USAGE_RETENTION_DAYS` (default 90; minimum 15; `0`/`off` disables) are folded into the new table `local_runner_usage_daily` (one row per day / computer / owner / person / status, with summed requests and tokens) and deleted, in **one atomic statement per batch** (5,000 rows, `FOR UPDATE SKIP LOCKED`, at most 200 batches per sweep). Additive: one new table, nothing dropped.
+- The api server sweeps 1 min after start and then every 6 h.
+- `GET /api/local-runners/usage` (chart + people) reads raw rows plus rollups, so totals never change when rows are folded. Daily caps only read today's raw rows (never folded).
+- By hand: `scripts/usage-retention.sh [days]` is a dry run (counts per owner); add `--apply` to fold.
+- Tests: `m3b-retention.test.ts`; e2e `66-m3b-retention.mjs` (synthetic qa rows, aborts if a sweep would touch anyone else).
