@@ -84,35 +84,73 @@ const RUN_SWEEP_MS = 10_000;
 const MAX_IN_FLIGHT = 2;
 
 /** M3: owner limits for one computer. Rate and daily cap apply to other people, not the owner. */
-export type DeviceLimits = { maxConcurrent: number; perUserPerMinute: number; dailyRequestCap: number | null };
-export const DEFAULT_LIMITS: DeviceLimits = { maxConcurrent: MAX_IN_FLIGHT, perUserPerMinute: 20, dailyRequestCap: null };
-export const LIMIT_BOUNDS = { maxConcurrent: [1, 8], perUserPerMinute: [1, 600], dailyRequestCap: [1, 100_000] } as const;
+export type DeviceLimits = {
+  maxConcurrent: number;
+  perUserPerMinute: number;
+  /** Requests per day from all other people together. */
+  dailyRequestCap: number | null;
+  /** M3b: requests per day from each other person. */
+  personDailyCap: number | null;
+  /** M3b: tokens (in + out) per day from all other people together. */
+  dailyTokenCap: number | null;
+};
+export const DEFAULT_LIMITS: DeviceLimits = {
+  maxConcurrent: MAX_IN_FLIGHT,
+  perUserPerMinute: 20,
+  dailyRequestCap: null,
+  personDailyCap: null,
+  dailyTokenCap: null,
+};
+export const LIMIT_BOUNDS = {
+  maxConcurrent: [1, 8],
+  perUserPerMinute: [1, 600],
+  dailyRequestCap: [1, 100_000],
+  personDailyCap: [1, 100_000],
+  dailyTokenCap: [1_000, 1_000_000_000],
+} as const;
+type LimitKey = keyof typeof LIMIT_BOUNDS;
+const NULLABLE_LIMITS = new Set<LimitKey>(["dailyRequestCap", "personDailyCap", "dailyTokenCap"]);
+
+/** Row from local_runner_limits → DeviceLimits (missing row = defaults). */
+export function limitsFromRow(r: Record<string, unknown> | undefined): DeviceLimits {
+  if (!r) return DEFAULT_LIMITS;
+  const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+  return {
+    maxConcurrent: Number(r.max_concurrent),
+    perUserPerMinute: Number(r.per_user_per_minute),
+    dailyRequestCap: n(r.daily_request_cap),
+    personDailyCap: n(r.person_daily_cap),
+    dailyTokenCap: n(r.daily_token_cap),
+  };
+}
 
 /** Validates an owner's limits update; returns an error message or the new limits. */
 export function normalizeLimits(input: unknown, current: DeviceLimits = DEFAULT_LIMITS): DeviceLimits | string {
   const body = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const out = { ...current };
-  const int = (key: "maxConcurrent" | "perUserPerMinute" | "dailyRequestCap", label: string): string | null => {
+  const int = (key: LimitKey, label: string): string | null => {
     if (!(key in body)) return null;
     const v = body[key];
-    if (key === "dailyRequestCap" && (v === null || v === "")) {
-      out.dailyRequestCap = null;
+    if (NULLABLE_LIMITS.has(key) && (v === null || v === "")) {
+      (out as Record<LimitKey, number | null>)[key] = null;
       return null;
     }
     const [min, max] = LIMIT_BOUNDS[key];
     if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) return `${label} must be a whole number from ${min} to ${max}`;
-    out[key] = v;
+    (out as Record<LimitKey, number | null>)[key] = v;
     return null;
   };
   return (
     int("maxConcurrent", "Answers at the same time") ??
     int("perUserPerMinute", "Requests per person per minute") ??
     int("dailyRequestCap", "Daily requests from other people") ??
+    int("personDailyCap", "Daily requests per person") ??
+    int("dailyTokenCap", "Daily tokens from other people") ??
     out
   );
 }
 
-export type LimitRefusal = "busy" | "rate_limited" | "daily_cap";
+export type LimitRefusal = "busy" | "rate_limited" | "daily_cap" | "person_cap";
 
 /** M3b: how long a request may wait for a free slot, and how many may wait per computer. */
 export const QUEUE_WAIT_MS = 60_000;
@@ -181,11 +219,17 @@ export function decideLimit(input: {
   recentRequests: number;
   /** Requests from people other than the owner on this computer today. */
   todayPeerRequests: number;
+  /** M3b: this person's requests on this computer today. */
+  todayPersonRequests?: number;
+  /** M3b: tokens used by other people on this computer today. */
+  todayPeerTokens?: number;
 }): LimitRefusal | null {
   if (input.inFlight >= input.limits.maxConcurrent) return "busy";
   if (input.isOwner) return null;
   if (input.recentRequests >= input.limits.perUserPerMinute) return "rate_limited";
-  if (input.limits.dailyRequestCap !== null && input.todayPeerRequests >= input.limits.dailyRequestCap) return "daily_cap";
+  if (input.limits.personDailyCap != null && (input.todayPersonRequests ?? 0) >= input.limits.personDailyCap) return "person_cap";
+  if (input.limits.dailyRequestCap != null && input.todayPeerRequests >= input.limits.dailyRequestCap) return "daily_cap";
+  if (input.limits.dailyTokenCap != null && (input.todayPeerTokens ?? 0) >= input.limits.dailyTokenCap) return "daily_cap";
   return null;
 }
 
@@ -427,6 +471,9 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
         daily_request_cap INT,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
+      // M3b (additive): per-person daily request cap and a daily token cap for other people.
+      await prisma.$executeRawUnsafe(`ALTER TABLE local_runner_limits ADD COLUMN IF NOT EXISTS person_daily_cap INT`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE local_runner_limits ADD COLUMN IF NOT EXISTS daily_token_cap INT`);
       await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_usage (
         id TEXT PRIMARY KEY,
         device_id TEXT NOT NULL,
@@ -647,14 +694,11 @@ export function createLocalRunnerGateway(deps: {
   async function limitsFor(deviceId: string): Promise<DeviceLimits> {
     const hit = limitsCache.get(deviceId);
     if (hit && Date.now() - hit.at < 30_000) return hit.limits;
-    const rows = await deps.prisma.$queryRawUnsafe<Array<{ max_concurrent: number; per_user_per_minute: number; daily_request_cap: number | null }>>(
-      `SELECT max_concurrent, per_user_per_minute, daily_request_cap FROM local_runner_limits WHERE device_id = $1`,
+    const rows = await deps.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `SELECT * FROM local_runner_limits WHERE device_id = $1`,
       deviceId,
     );
-    const r = rows[0];
-    const limits = r
-      ? { maxConcurrent: r.max_concurrent, perUserPerMinute: r.per_user_per_minute, dailyRequestCap: r.daily_request_cap }
-      : DEFAULT_LIMITS;
+    const limits = limitsFromRow(rows[0]);
     limitsCache.set(deviceId, { limits, at: Date.now() });
     return limits;
   }
@@ -1013,7 +1057,13 @@ export function createLocalRunnerGateway(deps: {
     return session.inFlight.size < LIMIT_BOUNDS.maxConcurrent[1] ? session : "busy";
   }
 
-  function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | undefined): Response {
+  function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | "person_cap" | undefined): Response {
+    if (kind === "person_cap") {
+      return Response.json(
+        { error: { message: "[shared_local_person_cap] Your daily limit on the owner's computer is used up.", type: "shared_local_person_cap" } },
+        { status: 429 },
+      );
+    }
     if (kind === "rate_limited") {
       return Response.json(
         { error: { message: "[shared_local_rate_limited] Too many requests to the owner's computer this minute.", type: "shared_local_rate_limited" } },
@@ -1131,17 +1181,25 @@ export function createLocalRunnerGateway(deps: {
     const now = Date.now();
     const rateKey = `${access.deviceId}|${consumerUserId}`;
     let todayPeer = 0;
-    if (!isOwner && limits.dailyRequestCap !== null) {
-      const rows = await deps.prisma.$queryRawUnsafe<Array<{ n: number }>>(
-        `SELECT COUNT(*)::int AS n FROM local_runner_usage
+    let todayPerson = 0;
+    let todayPeerTokens = 0;
+    if (!isOwner && (limits.dailyRequestCap !== null || limits.personDailyCap !== null || limits.dailyTokenCap !== null)) {
+      const rows = await deps.prisma.$queryRawUnsafe<Array<{ peer: number; person: number; tokens: number }>>(
+        `SELECT COUNT(*)::int AS peer,
+                COUNT(*) FILTER (WHERE consumer_user_id = $2)::int AS person,
+                COALESCE(SUM(input_tokens + output_tokens), 0)::bigint::float8 AS tokens
+           FROM local_runner_usage
           WHERE device_id = $1 AND consumer_user_id IS DISTINCT FROM owner_user_id
             AND status IN ('ok', 'error', 'cancelled') AND created_at >= date_trunc('day', NOW())`,
         access.deviceId,
+        consumerUserId,
       );
-      todayPeer = rows[0]?.n ?? 0;
+      todayPeer = rows[0]?.peer ?? 0;
+      todayPerson = rows[0]?.person ?? 0;
+      todayPeerTokens = Number(rows[0]?.tokens ?? 0);
     }
     // Rate and daily cap first (concurrency is handled by the queue below).
-    let refusal: LimitRefusal | null = decideLimit({ limits, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer });
+    let refusal: LimitRefusal | null = decideLimit({ limits, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer, todayPersonRequests: todayPerson, todayPeerTokens });
     let session = picked;
     if (!refusal) {
       // M3b: when the computer is busy, wait briefly (FIFO) instead of refusing at once.

@@ -49,5 +49,7 @@ describe("M3 limit refusals", () => {
     expect(sharedLocalRefusalKind('429 {"type":"shared_local_daily_cap"}')).toBe("daily_cap");
     expect(sharedLocalRefusalNotice("rate_limited", "Bot", "Ann", "m")).toMatch(/Try again in a minute/);
     expect(sharedLocalRefusalNotice("daily_cap", "Bot", "Ann", "m")).toMatch(/Try again tomorrow/);
+    expect(sharedLocalRefusalKind("[shared_local_person_cap] Your daily limit")).toBe("person_cap");
+    expect(sharedLocalRefusalNotice("person_cap", "Bot", "Ann", "m")).toMatch(/your limit for today is used up/);
   });
 });
