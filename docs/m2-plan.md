@@ -617,3 +617,11 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
 - Runs of one bot are serialised by the worker, so in practice the queue is reached by different bots, or different shared-group answers, on the same computer.
 - The device list shows `health.queued`, and the card shows "N waiting".
 - `SlotQueue` is a small class in `local-runners.ts` with unit tests (`m3b-queue.test.ts`). e2e: `e2e/m2b/64-m3b-queue.mjs`.
+
+## 18. M3b(b): per-person daily caps and token caps
+
+- `local_runner_limits` gains two nullable columns (additive): `person_daily_cap` (1–100000 requests per person per day) and `daily_token_cap` (1000–1e9 tokens per day, summed over everyone but the owner).
+- Checked before queueing, using the same daily usage query as the request cap. The owner is never limited.
+- Refusals: `person_cap` → "…and your limit for today is used up. Try again tomorrow." (usage row `refused_person_cap`); token cap → the existing `daily_cap` notice.
+- UI: two new fields in the Limits section; the summary shows `N/day per person` and `N tokens/day`.
+- Tests: `m3-limits.test.ts` (M3b caps), executor notice test; e2e `65-m3b-caps.mjs`.

@@ -4694,7 +4694,7 @@ export function classifySharedLocalFailure(rawMessage: string): "busy" | "offlin
 }
 
 /** M2b: typed gateway refusals (`[shared_local_<kind>] …`) that are not plain drops. */
-const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|thread_denied|external_denied|unbound|removed|run_ended|rate_limited|daily_cap)\b/i;
+const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|thread_denied|external_denied|unbound|removed|run_ended|rate_limited|daily_cap|person_cap)\b/i;
 
 export function sharedLocalRefusalKind(rawMessage: string): string | null {
   return SHARED_LOCAL_TYPED.exec(rawMessage)?.[1]?.toLowerCase() ?? null;
@@ -4726,6 +4726,8 @@ export function sharedLocalRefusalNotice(
       return `${botName} runs on ${ownerName}'s computer, which limits how often each person can ask. Try again in a minute.`;
     case "daily_cap":
       return `${botName} runs on ${ownerName}'s computer, and today's limit for other people is used up. Try again tomorrow.`;
+    case "person_cap":
+      return `${botName} runs on ${ownerName}'s computer, and your limit for today is used up. Try again tomorrow.`;
     case "run_ended":
       return `${botName} stopped because this run ended.`;
     default:
