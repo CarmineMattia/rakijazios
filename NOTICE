@@ -1,0 +1,12 @@
+Rakijazios
+Copyright 2026 Carmine Mattia
+
+This product is a modified, customized self-hosted distribution based on
+Rakazo (https://github.com/elie222/rakazo), which is licensed under the
+Apache License, Version 2.0.
+  Rakazo: Copyright 2026 Rakazo contributors
+
+Files under patches/ are modified versions of upstream Rakazo source files,
+changed for Rakijazios. The upstream copyright notices are retained.
+
+Many thanks to the Rakazo authors and contributors for their work.
