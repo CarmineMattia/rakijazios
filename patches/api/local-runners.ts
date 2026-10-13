@@ -10,6 +10,8 @@
  * (local_runner_bot_bindings). The gateway takes a run-bound token and re-checks
  * run, bot, binding, computer, model and group on every request, then routes to
  * the bound computer only.
+ * M2c: a bot may answer in a shared group only with a grant (local_runner_grants)
+ * from the owner of both; revoking a grant cancels its in-flight answers.
  */
 import { readdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -102,6 +104,8 @@ type PendingInfer = {
   id: string;
   ownerUserId: string;
   runId: string;
+  botId: string;
+  groupId: string | null;
   lastChunkAt: number;
   chunks: string[];
   status?: number;
@@ -204,6 +208,14 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
         `CREATE INDEX IF NOT EXISTS local_runner_bot_bindings_device_idx ON local_runner_bot_bindings (device_id)`,
       );
       await migrateM1Bindings(prisma);
+      // M2c (additive): the owner lets a bot answer for people in one shared group.
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_grants (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+        owner_user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (bot_id, group_id)
+      )`);
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -251,11 +263,16 @@ export async function loadSharedLocalAccessRow(
   runId: string,
 ): Promise<SharedLocalAccessRow | undefined> {
   const rows = await prisma.$queryRawUnsafe<SharedLocalAccessRow[]>(
-    `SELECT r."userId" AS run_user_id, r.status::text AS run_status, r.trigger::text AS run_trigger,
+    `SELECT b.id AS bot_id, r."userId" AS run_user_id, r.status::text AS run_status, r.trigger::text AS run_trigger,
             b."userId" AS bot_user_id, b."modelProvider" AS bot_model_provider, b."modelId" AS bot_model_id,
             (b."archivedAt" IS NOT NULL) AS bot_archived,
-            t."groupId" AS thread_group_id, (t."externalConversationId" IS NOT NULL) AS thread_external,
+            t."groupId" AS thread_group_id, t."botId" AS thread_bot_id,
+            (t."externalConversationId" IS NOT NULL) AS thread_external,
             (SELECT COUNT(*)::int FROM group_shares gs WHERE gs.group_id = t."groupId") AS group_share_count,
+            EXISTS (SELECT 1 FROM local_runner_grants g JOIN chat_groups cg ON cg.id = g.group_id
+                     WHERE g.bot_id = b.id AND g.group_id = t."groupId"
+                       AND g.owner_user_id = r."userId" AND cg."userId" = r."userId"
+                       AND cg."archivedAt" IS NULL) AS group_granted,
             bb.device_id AS bind_device_id, bb.model_id AS bind_model_id,
             d.user_id AS device_user_id, d.status AS device_status, d.enabled AS device_enabled,
             m.enabled AS model_enabled, m.advertised AS model_advertised, m.context_window AS model_context_window
@@ -310,6 +327,8 @@ export type LocalRunnerGateway = {
   disconnectDevice: (deviceId: string, reason: string) => void;
   /** M2b: models this computer can serve right now (advertised live AND switched on). */
   offeredModels: (deviceId: string) => string[];
+  /** M2c: stop in-flight answers of a bot in a group (grant revoked). Returns how many. */
+  cancelBotInGroup: (botId: string, groupId: string) => number;
 };
 
 /**
@@ -768,7 +787,7 @@ export function createLocalRunnerGateway(deps: {
   async function proxyChatCompletions(
     ownerUserId: string,
     runId: string,
-    deviceId: string,
+    access: { deviceId: string; botId: string; groupId: string | null },
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
@@ -776,7 +795,7 @@ export function createLocalRunnerGateway(deps: {
     if (!model) {
       return Response.json({ error: { message: "model is required" } }, { status: 400 });
     }
-    const picked = deviceSession(deviceId, model);
+    const picked = deviceSession(access.deviceId, model);
     if (!picked || typeof picked === "string") return liveError(picked);
     if (picked.userId !== ownerUserId) return liveError(undefined);
     const session = picked;
@@ -786,6 +805,8 @@ export function createLocalRunnerGateway(deps: {
       id,
       ownerUserId,
       runId,
+      botId: access.botId,
+      groupId: access.groupId,
       lastChunkAt: Date.now(),
       chunks: [],
       done: false,
@@ -941,6 +962,15 @@ export function createLocalRunnerGateway(deps: {
       }
       sendPolicy(session);
     },
+    cancelBotInGroup(botId: string, groupId: string): number {
+      let n = 0;
+      for (const p of [...pending.values()]) {
+        if (p.done || p.botId !== botId || p.groupId !== groupId) continue;
+        cancelPending(p.id, "[shared_local_group_denied] This bot isn't enabled for this shared group any more.");
+        n++;
+      }
+      return n;
+    },
     offeredModels(deviceId: string): string[] {
       const session = sessionsByDevice.get(deviceId);
       if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return [];
@@ -987,7 +1017,7 @@ export function createLocalRunnerGateway(deps: {
         const model = typeof body.model === "string" ? body.model : "";
         const auth = await authorize(c.req.header("authorization") ?? "", model || undefined);
         if (!auth.ok) return auth.response;
-        return proxyChatCompletions(auth.ownerUserId, auth.runId, auth.access.deviceId, body, c.req.raw.signal);
+        return proxyChatCompletions(auth.ownerUserId, auth.runId, auth.access, body, c.req.raw.signal);
       });
     },
     attachUpgrade(server: HttpServer) {

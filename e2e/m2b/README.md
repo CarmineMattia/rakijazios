@@ -14,3 +14,16 @@ cd e2e/m2b && RK_NPM_DIR=/path/with/puppeteer-core node 60-m2b-bind.mjs   # exit
 
 `RK_M2B_MODEL` picks the model to switch on (default `qwen2.5:3b` if offered, else the first one).
 Other variables are the same as in [`../m2a/README.md`](../m2a/README.md).
+
+## `61-m2c-grants.mjs` (M2c)
+
+This script uses the same accounts and throwaway runner as `60`. It checks:
+- in the shared "QA Group", a message without a grant gets the notice;
+- **Allow** in Manage sharing (the real dialog) → the bot answers;
+- **Turn off** during a long answer → the stream is cancelled, and the next message gets the notice;
+- the private chat still works;
+- qa2 sees "runs on rakazo_qa's computer" without device details, and gets 404 for grants;
+- anonymous requests get 401;
+- 0 secrets in the logs.
+
+At the end it removes the grant, the binding and the computer.

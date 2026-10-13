@@ -42,10 +42,43 @@
         });
       }
     } catch (error) { status.textContent = error.message; }
+    if (version === epoch) void localGrants(card, group, epoch);
+  }
+  // Rakijazios M2c: bots that run on the owner's computer need an explicit grant per shared group.
+  async function localGrants(card, group, epoch) {
+    let data;
+    try { data = await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/grants`); } catch { return; }
+    if (version !== epoch || !data.bots.length) return;
+    const box = el('div'); box.setAttribute('data-rk-local-grants', '1');
+    box.append(el('h3', 'Bots on your computer', { style: 'margin:8px 0 0;font-size:15px' }));
+    const missing = data.bots.filter(b => !b.granted);
+    if (data.shared && missing.length) box.append(el('p', `${missing.map(b => b.name).join(', ')} won't answer people in this group until you allow it.`, { className: 'rk-group-hint', style: 'color:#f59e0b' }));
+    for (const bot of data.bots) {
+      const row = el('div', '', { className: 'rk-group-row' }); row.setAttribute('data-rk-grant', bot.botId);
+      const label = el('span'); label.append(el('div', `Let ${bot.name} answer for people in this group`), el('div', 'Their messages in this group will be sent to the model on your computer.', { className: 'rk-group-hint' }));
+      const button = el('button', bot.granted ? 'Turn off' : 'Allow', { type: 'button' });
+      row.append(label, button); box.append(row);
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try { await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/grants`, { botId: bot.botId, allowed: !bot.granted }); bot.granted = !bot.granted; button.textContent = bot.granted ? 'Turn off' : 'Allow'; }
+        catch (error) { button.textContent = error.message; }
+        finally { button.disabled = false; }
+      });
+    }
+    card.append(box);
+  }
+  async function runsOnBadge(hint, group, epoch) {
+    let data;
+    try { data = await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/runs-on`); } catch { return; }
+    if (version !== epoch || !data.bots.length) return;
+    const badge = el('div', data.bots.map(b => `${b.name} runs on ${b.runsOn}${b.online ? '' : ' (offline)'}${b.enabledHere ? '' : ' · not enabled here'}`).join(' · '), { className: 'rk-group-hint' });
+    badge.setAttribute('data-rk-runs-on', '1');
+    hint.after(badge);
   }
   async function conversation(group) {
     const card = dialog(group.name), epoch = version;
-    card.append(el('p', `Shared conversation · ${group.bots.join(', ')}. Bot requests for approval must be handled by the owner.`, { className: 'rk-group-hint' }));
+    const hint = el('p', `Shared conversation · ${group.bots.join(', ')}. Bot requests for approval must be handled by the owner.`, { className: 'rk-group-hint' });
+    card.append(hint); void runsOnBadge(hint, group, epoch);
     const history = el('div', '', { className: 'rk-group-history' }), status = el('p', 'Loading…'); status.setAttribute('role', 'status');
     const earlier = el('button', 'Load earlier messages', { type: 'button' });
     const form = el('form'), input = el('textarea', '', { placeholder: 'Message the group bots', maxLength: 16000, required: true }); input.setAttribute('aria-label', 'Message the group bots');
