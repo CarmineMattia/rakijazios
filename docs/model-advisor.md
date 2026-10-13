@@ -158,6 +158,9 @@ recommendation.
 
 All calls were made unauthenticated on 2026-10-13.
 
+> **Note:** example URLs here and in §11 use `main` for research. Production always uses the pinned
+> 40-character commit `sha` (`tree/<sha>`, `resolve/<sha>/…`), never `main` (§3.3, §4).
+
 | Need | Call | What it returns (verified) |
 |---|---|---|
 | List GGUF repos | `GET https://huggingface.co/api/models?filter=gguf&sort=<key>&limit=N` | `sort` worked with `trendingScore`, `downloads`, `likes`, `lastModified`, `createdAt`. Default keys: `_id, id, modelId, private, downloads, likes, pipeline_tag, library_name, tags, createdAt` (`library_name` absent with `sort=lastModified`), plus `trendingScore` / `lastModified` when sorted by them. |
@@ -446,7 +449,7 @@ tooltip.
 
 ```
 ┌ 🖥️ Host-001 · 🟢 online ──────────────────────────────────────┐
-│ 🧠 128 GB unified · AMD Radeon 8060S (Vulkan) · 💾 1.3 TB free │
+│ 🧠 128 GB unified · RDNA 3.5 APU (Vulkan) · 💾 > 1 TB free    │
 │ [ 🔍 What can this computer run? ]                             │
 └────────────────────────────────────────────────────────────────┘
 
@@ -516,11 +519,18 @@ M5 (device app with a bundled llama.cpp and "model chosen by device RAM") reuses
 
 13. **On-device confirmation UX**: a CLI prompt is fine for headless nodes, but desktops need a
     notification or tray prompt. Which one before M5?
+    *Proposed (Rakazo Tester):* a CLI `rakazo-runner approve <id>` plus a desktop notification; a
+    request expires after ~15 min; a tray prompt comes with the M5 app.
 14. **Catalog signing**: who holds the offline key, how it is rotated, and what a runner does with an
     expired signature.
+    *Proposed:* an offline Ed25519 owner key; the runner trusts the current and the next public key
+    (for rotation); an expired signature keeps installed models working but refuses new installs.
 15. Is "local fit computation only" (no hardware report at all) enough for every UI, or does the web
     need the coarse report for anything?
+    *Proposed:* fit is computed on the device by default; the coarse report is a separate opt-in.
 16. Measured download-time estimates: from what bandwidth figure, without leaking it?
+    *Proposed:* before the download, show only a size-based range; during it, an ETA computed on the
+    device; the bandwidth figure is never sent to the server.
 ---
 
 ## 10. Feasibility check on Host-001
@@ -546,9 +556,9 @@ sysfs: `mem_info_vram_total` 65,536 MiB, `mem_info_gtt_total` 63,917 MiB (kernel
 llama.cpp Vulkan: 129,453 MiB = 65,536 + 63,917, i.e. carve-out + GTT. `free`: 62.4 GiB system RAM.
 **GTT is not extra memory**: it is the OS's own 62.4 GiB mapped for the GPU, so the physical total
 stays 128 GiB (≈ 126.4 GiB visible), and anything above the 64 GiB carve-out comes out of OS RAM.
-Rule ([§2.2](#22-memory-budget-per-platform), Linux APU with carve-out): (64 + 62.4) − reserve
-the desktop reserve max(16 GiB, 10 % ≈ 12.8 GiB) = **16 GiB** (Host-001 already uses ~9 GiB plus cache
-for docker, Chrome and Ollama) gives **≈ 110 GiB**, under the runtime cap (126.4 GiB) and the
+Rule ([§2.2](#22-memory-budget-per-platform), Linux APU with carve-out): budget = (64 + 62.4) GiB
+minus the desktop OS reserve. That reserve is max(16 GiB, 10 % ≈ 12.8 GiB) = **16 GiB** (Host-001
+already uses ~9 GiB plus cache for docker, Chrome and Ollama), so the budget is **≈ 110 GiB**, under the runtime cap (126.4 GiB) and the
 GTT cap (`ttm.pages_limit` = 124 GiB). The ✅ line (75 %) is ≈ 83 GiB.
 `rocminfo` is not installed, so ROCm probing must be optional.
 
@@ -590,4 +600,5 @@ curl -sL https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/resolve/main/LICEN
 llama-server --list-devices        # on the device
 ```
 
-(With curl, `expand[]` may need `-g` or `%5B%5D` encoding.)
+(With curl, `expand[]` may need `-g` or `%5B%5D` encoding. These commands use `main` for convenience.
+Production code uses the pinned 40-character `sha` only.)
