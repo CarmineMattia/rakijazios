@@ -607,3 +607,13 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
 - **API:** the device list gains `limits` and `limitBounds`. `POST /api/local-runners/devices/:id/limits` is owner only (404 for others; 400 when out of range). `GET /api/local-runners/usage?days=14` returns the owner's usage per day and computer, plus a per-person list (other people by name, the owner as "You").
 - **UI (My hardware):** a "Limits" section on each card, and a "Usage (last 14 days)" bar chart: blue = you, purple = other people, red = refused. A per-person table follows the chart.
 - **Left for M3b:** usage retention and pruning, per-person caps (today the daily cap is shared by everyone other than the owner), a token-based daily cap, a live queue instead of an immediate 429 on busy, timeout tuning from load tests, and CSV export.
+
+## 17. M3b(a): wait briefly when the computer is busy (branch `feat/share-local-ai-m3b-queue`)
+
+- When a computer already gives as many answers as its "answers at the same time" limit, a new request now **waits for a free slot**. Waiting is first come, first served, per computer, for up to `QUEUE_WAIT_MS` = 60 s, with at most `QUEUE_MAX` = 8 requests waiting.
+- Only after the wait times out, or when the queue is full, does it get `429 [shared_local_busy]` with the existing "busy, try again shortly" notice.
+- The per-person rate and daily cap are still checked first, so people over their limit are refused at once.
+- A waiting request stops when its run is cancelled (request aborted) or when the computer goes offline, is paused, or stops offering the model. Those cases get the matching notice.
+- Runs of one bot are serialised by the worker, so in practice the queue is reached by different bots, or different shared-group answers, on the same computer.
+- The device list shows `health.queued`, and the card shows "N waiting".
+- `SlotQueue` is a small class in `local-runners.ts` with unit tests (`m3b-queue.test.ts`). e2e: `e2e/m2b/64-m3b-queue.mjs`.
