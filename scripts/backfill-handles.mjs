@@ -24,8 +24,10 @@ const used = new Set(sql(`select lower(name) from "user" where coalesce(trim(nam
 const plan = [];
 for (const r of rows) {
   const base = handleFromEmail(r.email);
+  // Same rule as sign-up: base, base_2 … base_99, then a random suffix.
   let h = base;
-  for (let n = 2; used.has(h); n++) h = base.slice(0, 24 - `_${n}`.length) + `_${n}`;
+  for (let n = 2; used.has(h) && n < 100; n++) h = base.slice(0, 24 - `_${n}`.length) + `_${n}`;
+  while (used.has(h)) { const sfx = `_${Math.random().toString(36).slice(2, 8)}`; h = base.slice(0, 24 - sfx.length) + sfx; }
   used.add(h);
   const inScope = !domain || r.email.toLowerCase().endsWith('@' + domain.toLowerCase());
   plan.push({ ...r, handle: h, inScope });
