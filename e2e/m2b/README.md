@@ -33,3 +33,15 @@ At the end it removes the grant, the binding and the computer.
 Pairs a throwaway 0.2.3 runner for qa, checks the health report, `POST /devices/:id/check` (API + "Check now" in the UI), 404 for qa2, and "Not reachable" after the runner is stopped. Removes only its own computer and pairing.
 
 Note: `e2e/m2a/50-m2a-pair.mjs` now also removes only what it created (it used to delete every qa computer), and `lib.mjs` `login()` waits and retries when the magic-link endpoint answers 429 (the per-script browser profile already reuses the session).
+
+## 63-m3a-limits.mjs (M3a limits + usage)
+
+This script sets the throwaway computer's rate limit to 1 per minute, then checks:
+- the owner is not rate limited;
+- usage rows exist per run, with tokens and a matching `usage_records` row;
+- qa2's request in the shared group is attributed to qa2, and qa2's second request gets the rate-limit notice;
+- the daily cap notice appears for qa2, while the owner still answers;
+- qa2 gets 404 on `/limits` and can't see qa's usage;
+- the usage API shows the expected numbers, and the chart and the "Save limits" button work in the UI.
+
+It removes its own computer, the bot binding, the grants and the usage rows for that computer.

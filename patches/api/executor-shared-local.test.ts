@@ -41,3 +41,13 @@ describe("shared-local refusals (M2b)", () => {
     expect(classifySharedLocalFailure("Inference idle timeout (no tokens for 5 min)")).toBe("offline");
   });
 });
+
+describe("M3 limit refusals", () => {
+  it("maps rate limit and daily cap to readable notices", async () => {
+    const { sharedLocalRefusalKind, sharedLocalRefusalNotice } = await import("./executor.js");
+    expect(sharedLocalRefusalKind("[shared_local_rate_limited] Too many requests")).toBe("rate_limited");
+    expect(sharedLocalRefusalKind('429 {"type":"shared_local_daily_cap"}')).toBe("daily_cap");
+    expect(sharedLocalRefusalNotice("rate_limited", "Bot", "Ann", "m")).toMatch(/Try again in a minute/);
+    expect(sharedLocalRefusalNotice("daily_cap", "Bot", "Ann", "m")).toMatch(/Try again tomorrow/);
+  });
+});

@@ -594,3 +594,16 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
 - **API:** `GET /api/local-runners/devices` adds `health`, `updateAvailable`, `latestRunnerVersion`. New `POST /api/local-runners/devices/:id/check` (owner only, 404 otherwise) → `{online:false}` | `{online:true, supported:false, runnerVersion}` | `{online:true, supported:true, health}`.
 - **UI (My hardware card):** health line (model server OK / not answering, answering now, last answer, last problem, last disconnect), a "Check now" button with a plain-language result, and an "Update available" hint for runners older than 0.2.3 (press New key and run the command on that computer; it keeps this computer and its settings).
 - No DB changes. No new ports; the runner stays outbound-only and only dials loopback.
+
+## 16. M3a: limits and usage (branch `feat/share-local-ai-m3`)
+
+- **Tables (additive, created at startup):** `local_runner_limits(device_id PK → devices ON DELETE CASCADE, max_concurrent 2, per_user_per_minute 20, daily_request_cap NULL)` and `local_runner_usage(id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status, input_tokens, output_tokens, duration_ms, created_at)` with indexes on (device_id, created_at) and (owner_user_id, created_at).
+- **Who is the consumer:** the sender of a shared-group message (`group_message_authors` via `runs.sourceMessageId`), otherwise the run user (the owner).
+- **Rules (gateway, per model request):**
+  - "Answers at the same time" applies to everyone, including the owner (1–8).
+  - The per-person rate (1–600 per minute, sliding 60 s, in memory) and the daily cap (requests from other people since 00:00 server time, counted from usage rows) apply only to other people.
+  - Refusals are `429 [shared_local_rate_limited]` (with `retry-after: 60`) and `429 [shared_local_daily_cap]`. The executor turns them into chat notices: "…limits how often each person can ask. Try again in a minute." and "…today's limit for other people is used up. Try again tomorrow." There is no fallback model (D1).
+- **Usage rows:** one row per model request, written when it ends with status `ok`, `error` or `cancelled`. Refused requests get a row with status `refused_<kind>`. Token counts come from the final streamed chunk; the gateway asks for it with `stream_options.include_usage`.
+- **API:** the device list gains `limits` and `limitBounds`. `POST /api/local-runners/devices/:id/limits` is owner only (404 for others; 400 when out of range). `GET /api/local-runners/usage?days=14` returns the owner's usage per day and computer, plus a per-person list (other people by name, the owner as "You").
+- **UI (My hardware):** a "Limits" section on each card, and a "Usage (last 14 days)" bar chart: blue = you, purple = other people, red = refused. A per-person table follows the chart.
+- **Left for M3b:** usage retention and pruning, per-person caps (today the daily cap is shared by everyone other than the owner), a token-based daily cap, a live queue instead of an immediate 429 on busy, timeout tuning from load tests, and CSV export.

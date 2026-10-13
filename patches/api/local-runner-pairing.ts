@@ -145,6 +145,8 @@ export type SharedLocalAccessRow = {
   device_enabled: boolean | null;
   model_enabled: boolean | null;
   model_advertised: boolean | null;
+  /** M3: the person this run answers (a shared group's sender), else the run user. */
+  consumer_user_id?: string | null;
   model_context_window: number | null;
 };
 
