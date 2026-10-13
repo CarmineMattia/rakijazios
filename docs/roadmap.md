@@ -49,9 +49,14 @@ done** unless ticked. Bigger items have a design doc in `docs/` with an **Open q
         computers per account (max 10), model switches, pause, rename, new key, remove.
         Runner 0.2.x with model-server auto-detection; WebSocket through the web origin. Plan and
         as-built notes: [`m2-plan.md`](m2-plan.md).
-  - [ ] **M2b —** choose a computer + model for a bot in its settings.
-  - [ ] **M2c —** grants for shared groups.
-  - [ ] **M3 —** limits and usage.
+  - [x] **M2b —** choose a computer + model for a bot ("Bots on my computer"); run-bound gateway
+        checks. As built: [`m2-plan.md` §13](m2-plan.md).
+  - [x] **M2c —** grants for shared groups, "runs on" badge, revoke stops answers mid-stream.
+        As built: [`m2-plan.md` §14](m2-plan.md).
+  - [x] **Runner health —** runner 0.2.3 health reports, "Check now", update hint.
+        As built: [`m2-plan.md` §15](m2-plan.md).
+  - [ ] **M3 —** limits and usage. M3a (per-computer limits, usage rows, chart) is in review in
+        PR #16; M3b (retention, per-person and token caps, queueing) is planned.
 
 ## Bot marketplace
 
