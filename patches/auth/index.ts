@@ -253,6 +253,19 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             if (isMessagingEmail(user.email)) {
               throw new APIError("BAD_REQUEST", { message: "Email is not available" });
             }
+            // Magic-link sign-up arrives without a name: give the account a unique @handle
+            // from the email local part (qa3@x → qa3, then qa3_2, …) so it never shows "?".
+            if (!String(user.name ?? "").trim()) {
+              const name = await uniqueHandle(user.email, async (candidate) =>
+                Boolean(
+                  await prisma.user.findFirst({
+                    where: { name: { equals: candidate, mode: "insensitive" } },
+                    select: { id: true },
+                  }),
+                ),
+              );
+              return { data: { ...user, name } };
+            }
           },
         },
         update: {
@@ -265,6 +278,40 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       },
     },
   });
+}
+
+const HANDLE_MAX = 24;
+
+/** "Qa.Three+test@x" → "qa_three". Letters, digits and _ only; 3–24 chars; never empty. */
+export function handleFromEmail(email: string): string {
+  const local = String(email ?? "").split("@")[0]!.split("+")[0]!;
+  let base = local
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, HANDLE_MAX);
+  if (base.length < 3) base = `user${base ? `_${base}` : ""}`;
+  return base;
+}
+
+/** First free handle: base, base_2 … base_99, then base_<random>. `taken` is case-insensitive. */
+export async function uniqueHandle(
+  email: string,
+  taken: (candidate: string) => Promise<boolean>,
+  random: () => string = () => Math.random().toString(36).slice(2, 8),
+): Promise<string> {
+  const base = handleFromEmail(email);
+  if (!(await taken(base))) return base;
+  for (let n = 2; n < 100; n++) {
+    const suffix = `_${n}`;
+    const candidate = base.slice(0, HANDLE_MAX - suffix.length) + suffix;
+    if (!(await taken(candidate))) return candidate;
+  }
+  const suffix = `_${random()}`;
+  return base.slice(0, HANDLE_MAX - suffix.length) + suffix;
 }
 
 export function verificationEmail(email: string, url: string): TransactionalEmail {

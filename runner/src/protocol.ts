@@ -9,6 +9,10 @@ export type HelloFrame = {
   token: string;
   runnerVersion: string;
   offeredModels: string[];
+  /** M2a: e.g. "linux-x64" (informational) */
+  platform?: string;
+  /** M2a: which local server was found, e.g. "ollama"; "none" when nothing answers */
+  modelServer?: string;
 };
 
 export type HeartbeatFrame = { type: "heartbeat"; at?: number };
@@ -16,7 +20,9 @@ export type HeartbeatAckFrame = { type: "heartbeat_ack"; at?: number };
 
 export type ModelsFrame = {
   type: "models";
-  models: Array<{ id: string; name?: string }>;
+  models: Array<{ id: string; name?: string; contextWindow?: number }>;
+  /** M2a: which local server answered, or "none" */
+  modelServer?: string;
 };
 
 export type InferRequestFrame = {
@@ -53,8 +59,35 @@ export type PolicyFrame = {
   type: "policy";
   maxInFlight?: number;
   hardTimeoutMs?: number;
+  /** M2a: false = the owner paused sharing for this computer */
+  enabled?: boolean;
+  /** M2a: models the owner switched on; anything else is refused locally too */
+  allowedModels?: string[];
 };
 
+/**
+ * Runner health (0.2.3+): sent after connecting, whenever it changes, and in answer to a
+ * `health.check` (then `checkId` echoes the request). Never contains secrets or paths.
+ */
+export type HealthFrame = {
+  type: "health";
+  checkId?: string;
+  modelServer: string;
+  modelServerOk: boolean;
+  models: number;
+  /** Round trip to the local model server's model list, when just checked. */
+  latencyMs?: number;
+  inFlight: number;
+  uptimeSec: number;
+  /** Last local problem (model server unreachable, last failed answer), short text. */
+  lastError?: string;
+  lastErrorAt?: number;
+};
+
+/** Owner pressed "Check now": re-probe the local model server and answer with `health`. */
+export type HealthCheckFrame = { type: "health.check"; id: string };
+
+/** reason: "revoked" | "rotated" | "replaced" | "maintenance" | … */
 export type ByeFrame = { type: "bye"; reason?: string };
 
 export type ClientToServerFrame =
@@ -63,14 +96,16 @@ export type ClientToServerFrame =
   | ModelsFrame
   | InferChunkFrame
   | InferDoneFrame
-  | InferErrorFrame;
+  | InferErrorFrame
+  | HealthFrame;
 
 export type ServerToClientFrame =
   | HeartbeatAckFrame
   | InferRequestFrame
   | InferCancelFrame
   | PolicyFrame
-  | ByeFrame;
+  | ByeFrame
+  | HealthCheckFrame;
 
 export type ProtocolFrame = ClientToServerFrame | ServerToClientFrame;
 
@@ -81,6 +116,7 @@ const CLIENT_TYPES = new Set([
   "infer.chunk",
   "infer.done",
   "infer.error",
+  "health",
 ]);
 
 const SERVER_TYPES = new Set([
@@ -89,6 +125,7 @@ const SERVER_TYPES = new Set([
   "infer.cancel",
   "policy",
   "bye",
+  "health.check",
 ]);
 
 export function encodeFrame(frame: ProtocolFrame): string {
