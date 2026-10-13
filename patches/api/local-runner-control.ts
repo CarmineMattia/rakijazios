@@ -32,6 +32,7 @@ import {
   LATEST_RUNNER_VERSION,
   LIMIT_BOUNDS,
   limitsFromRow,
+  USAGE_ROWS_SQL,
   normalizeLimits,
   runnerUpdateAvailable,
   type DeviceLimits,
@@ -541,25 +542,25 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
       await ensureLocalRunnerTables(prisma);
       const days = Math.min(90, Math.max(1, Number.parseInt(c.req.query("days") ?? "14", 10) || 14));
       const daily = await prisma.$queryRawUnsafe<Array<{ day: string; device_id: string; requests: number; refused: number; input_tokens: number; output_tokens: number; peer_requests: number }>>(
-        `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, device_id,
-                COUNT(*) FILTER (WHERE status NOT LIKE 'refused_%')::int AS requests,
-                COUNT(*) FILTER (WHERE status LIKE 'refused_%')::int AS refused,
+        `SELECT to_char(day, 'YYYY-MM-DD') AS day, device_id,
+                COALESCE(SUM(n) FILTER (WHERE status NOT LIKE 'refused_%'), 0)::int AS requests,
+                COALESCE(SUM(n) FILTER (WHERE status LIKE 'refused_%'), 0)::int AS refused,
                 COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
-                COUNT(*) FILTER (WHERE status NOT LIKE 'refused_%' AND consumer_user_id IS DISTINCT FROM owner_user_id)::int AS peer_requests
-           FROM local_runner_usage
-          WHERE owner_user_id = $1 AND created_at >= date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day'
+                COALESCE(SUM(n) FILTER (WHERE status NOT LIKE 'refused_%' AND consumer_user_id IS DISTINCT FROM owner_user_id), 0)::int AS peer_requests
+           FROM ${USAGE_ROWS_SQL} AS u
+          WHERE owner_user_id = $1 AND day >= (date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day')::date
           GROUP BY 1, 2 ORDER BY 1, 2`,
         uid,
         days,
       );
       const people = await prisma.$queryRawUnsafe<Array<{ user_id: string | null; name: string | null; requests: number; refused: number; tokens: number }>>(
         `SELECT u.consumer_user_id AS user_id, us.name,
-                COUNT(*) FILTER (WHERE u.status NOT LIKE 'refused_%')::int AS requests,
-                COUNT(*) FILTER (WHERE u.status LIKE 'refused_%')::int AS refused,
+                COALESCE(SUM(u.n) FILTER (WHERE u.status NOT LIKE 'refused_%'), 0)::int AS requests,
+                COALESCE(SUM(u.n) FILTER (WHERE u.status LIKE 'refused_%'), 0)::int AS refused,
                 COALESCE(SUM(u.input_tokens + u.output_tokens), 0)::int AS tokens
-           FROM local_runner_usage u LEFT JOIN "user" us ON us.id = u.consumer_user_id
-          WHERE u.owner_user_id = $1 AND u.created_at >= date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day'
+           FROM ${USAGE_ROWS_SQL} AS u LEFT JOIN "user" us ON us.id = u.consumer_user_id
+          WHERE u.owner_user_id = $1 AND u.day >= (date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day')::date
           GROUP BY 1, 2 ORDER BY requests DESC LIMIT 20`,
         uid,
         days,

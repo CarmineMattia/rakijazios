@@ -495,6 +495,21 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
       await prisma.$executeRawUnsafe(
         `CREATE INDEX IF NOT EXISTS local_runner_usage_owner_idx ON local_runner_usage (owner_user_id, created_at)`,
       );
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_usage_daily (
+        day DATE NOT NULL,
+        device_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        consumer_user_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        requests INT NOT NULL DEFAULT 0,
+        input_tokens BIGINT NOT NULL DEFAULT 0,
+        output_tokens BIGINT NOT NULL DEFAULT 0,
+        duration_ms BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, device_id, owner_user_id, consumer_user_id, status)
+      )`);
+      await prisma.$executeRawUnsafe(
+        `CREATE INDEX IF NOT EXISTS local_runner_usage_daily_owner_idx ON local_runner_usage_daily (owner_user_id, day)`,
+      );
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -1017,6 +1032,8 @@ export function createLocalRunnerGateway(deps: {
     });
   }
 
+  startUsageRetention(deps.prisma);
+
   // Stale heartbeat sweeper
   setInterval(() => {
     const now = Date.now();
@@ -1522,4 +1539,107 @@ export function createLocalRunnerGateway(deps: {
       });
     },
   };
+}
+
+
+// ---------- M3b(c): usage retention ----------
+// Raw usage rows older than the retention window are folded into
+// local_runner_usage_daily (one row per day/computer/owner/person/status) and
+// deleted in the same statement, so totals and charts never change.
+
+export const USAGE_RETENTION_DEFAULT_DAYS = 90;
+/** The chart reads up to 90 days, but the rollups keep it exact, so a shorter window is fine; 15 keeps today's caps and a 14-day view on raw rows. */
+export const USAGE_RETENTION_MIN_DAYS = 15;
+export const USAGE_RETENTION_BATCH = 5_000;
+export const USAGE_RETENTION_MAX_BATCHES = 200;
+
+/** RK_LOCAL_USAGE_RETENTION_DAYS: unset/invalid → 90, "0"/"off" → disabled (null), else clamped to ≥ 15. */
+export function usageRetentionDays(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return USAGE_RETENTION_DEFAULT_DAYS;
+  const v = raw.trim().toLowerCase();
+  if (v === "0" || v === "off" || v === "false") return null;
+  const n = Number.parseInt(v, 10);
+  if (!Number.isFinite(n) || n < 0 || String(n) !== v) return USAGE_RETENTION_DEFAULT_DAYS;
+  return Math.max(USAGE_RETENTION_MIN_DAYS, n);
+}
+
+/** Raw rows + rollups as (day, device_id, owner_user_id, consumer_user_id, status, n, input_tokens, output_tokens). */
+export const USAGE_ROWS_SQL = `(
+  SELECT date_trunc('day', created_at)::date AS day, device_id, owner_user_id, consumer_user_id, status,
+         1::bigint AS n, input_tokens::bigint AS input_tokens, output_tokens::bigint AS output_tokens
+    FROM local_runner_usage
+  UNION ALL
+  SELECT day, device_id, owner_user_id, NULLIF(consumer_user_id, ''), status,
+         requests::bigint, input_tokens, output_tokens
+    FROM local_runner_usage_daily
+)`;
+
+const ROLLUP_BATCH_SQL = `WITH victims AS (
+    SELECT id FROM local_runner_usage
+     WHERE created_at < date_trunc('day', NOW()) - $1::int * INTERVAL '1 day'
+     ORDER BY created_at LIMIT $2::int FOR UPDATE SKIP LOCKED
+  ), del AS (
+    DELETE FROM local_runner_usage u USING victims v WHERE u.id = v.id
+    RETURNING u.created_at, u.device_id, u.owner_user_id, u.consumer_user_id, u.status, u.input_tokens, u.output_tokens, u.duration_ms
+  ), agg AS (
+    INSERT INTO local_runner_usage_daily AS d (day, device_id, owner_user_id, consumer_user_id, status, requests, input_tokens, output_tokens, duration_ms)
+    SELECT date_trunc('day', created_at)::date, device_id, owner_user_id, COALESCE(consumer_user_id, ''), status,
+           COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(duration_ms)
+      FROM del GROUP BY 1, 2, 3, 4, 5
+    ON CONFLICT (day, device_id, owner_user_id, consumer_user_id, status) DO UPDATE SET
+      requests = d.requests + EXCLUDED.requests,
+      input_tokens = d.input_tokens + EXCLUDED.input_tokens,
+      output_tokens = d.output_tokens + EXCLUDED.output_tokens,
+      duration_ms = d.duration_ms + EXCLUDED.duration_ms
+  )
+  SELECT COUNT(*)::int AS n FROM del`;
+
+/** Dry run: how many raw rows a sweep would fold, split by qa-owned vs everyone else. */
+export async function countExpiredUsage(prisma: PrismaClient, days: number): Promise<{ total: number; byOwner: Array<{ owner_user_id: string; n: number }> }> {
+  await ensureLocalRunnerTables(prisma);
+  const byOwner = await prisma.$queryRawUnsafe<Array<{ owner_user_id: string; n: number }>>(
+    `SELECT owner_user_id, COUNT(*)::int AS n FROM local_runner_usage
+      WHERE created_at < date_trunc('day', NOW()) - $1::int * INTERVAL '1 day' GROUP BY 1 ORDER BY 2 DESC`,
+    days,
+  );
+  return { total: byOwner.reduce((a, r) => a + Number(r.n), 0), byOwner };
+}
+
+/** Fold + delete expired raw rows in batches. Safe to run concurrently (SKIP LOCKED, one atomic statement per batch). */
+export async function sweepUsage(
+  prisma: PrismaClient,
+  days: number,
+  opts: { batch?: number; maxBatches?: number } = {},
+): Promise<{ folded: number; batches: number }> {
+  await ensureLocalRunnerTables(prisma);
+  const batch = opts.batch ?? USAGE_RETENTION_BATCH;
+  const maxBatches = opts.maxBatches ?? USAGE_RETENTION_MAX_BATCHES;
+  let folded = 0;
+  let batches = 0;
+  while (batches < maxBatches) {
+    const [row] = await prisma.$queryRawUnsafe<Array<{ n: number }>>(ROLLUP_BATCH_SQL, days, batch);
+    const n = Number(row?.n ?? 0);
+    batches += 1;
+    folded += n;
+    if (n < batch) break;
+  }
+  return { folded, batches };
+}
+
+let retentionTimer: ReturnType<typeof setInterval> | null = null;
+/** Starts the periodic sweep (first run after 1 min, then every 6 h). Idempotent. */
+export function startUsageRetention(prisma: PrismaClient, env: NodeJS.ProcessEnv = process.env): number | null {
+  const days = usageRetentionDays(env.RK_LOCAL_USAGE_RETENTION_DAYS);
+  if (days === null || retentionTimer) return days;
+  const run = () => {
+    void sweepUsage(prisma, days)
+      .then((r) => {
+        if (r.folded) console.log(`[local-runners] usage retention: folded ${r.folded} rows older than ${days} days into daily totals`);
+      })
+      .catch((error) => console.warn("[local-runners] usage retention sweep failed:", error instanceof Error ? error.message : error));
+  };
+  setTimeout(run, 60_000).unref?.();
+  retentionTimer = setInterval(run, 6 * 60 * 60_000);
+  retentionTimer.unref?.();
+  return days;
 }
