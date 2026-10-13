@@ -132,7 +132,7 @@ outbound runner (no inbound port). Details: [`docs/share-local-ai.md` → M1 as 
 
 1. Compose already sets `RAKAZO_SHARED_LOCAL_GATEWAY_URL` / `RAKAZO_SHARED_LOCAL_MODELS` and mounts
    the gateway/provider patches for `api` and `worker`.
-2. Seed a device token into a `0600` file (never printed) — see [`runner/README.md`](../runner/README.md#1-seed-a-device-token-operator-once).
+2. Seed a device token into a `0600` file (never printed) — see [`runner/README.md`](../runner/README.md#4-operator-seeding-m1-path-still-supported).
 3. `runner/scripts/start.sh` (stop: `runner/scripts/stop.sh`; log: `~/.config/rakazo-runner/runner.log`).
 4. Point one bot at it (operator SQL; no UI in M1):
    `UPDATE bots SET "modelProvider"='shared-local', "modelId"='gemma4:26b-a4b-it-q4_K_M' WHERE id='<bot>';`
