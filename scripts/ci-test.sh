@@ -5,7 +5,9 @@
 #   scripts/ci-test.sh            (needs node >= 22.18 and docker)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-IMAGE="${RAKAZO_APP_IMAGE:-ghcr.io/elie222/rakazo/app:edge}"
+# Pinned to the image Host-001 runs (the patches target it); upstream :edge moves on and breaks the typecheck.
+# Bump together with the live stack: docker image inspect ghcr.io/elie222/rakazo/app:edge --format '{{json .RepoDigests}}'
+IMAGE="${RAKAZO_APP_IMAGE:-ghcr.io/elie222/rakazo/app@sha256:1a70f06cf3c7a3f5c7f53e15b62f3c0709b81520ed40e671a1acb2ffcc40654c}"
 fail=0
 
 echo "== runner tests"

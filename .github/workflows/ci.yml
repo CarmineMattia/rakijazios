@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  # Same pin as scripts/ci-test.sh: the app image Host-001 runs.
+  RAKAZO_APP_IMAGE: ghcr.io/elie222/rakazo/app@sha256:1a70f06cf3c7a3f5c7f53e15b62f3c0709b81520ed40e671a1acb2ffcc40654c
+
 permissions:
   contents: read
 
@@ -24,6 +28,6 @@ jobs:
         with:
           node-version: "22.18"
       - name: Pull app image
-        run: docker pull ghcr.io/elie222/rakazo/app:edge
+        run: docker pull "$RAKAZO_APP_IMAGE"
       - name: Checks
         run: scripts/ci-test.sh
