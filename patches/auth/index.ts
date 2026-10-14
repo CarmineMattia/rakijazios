@@ -13,6 +13,8 @@ export interface AuthEnv {
   signupsEnabled: string | undefined;
   signupAllowlist: string | undefined;
   extraOrigins?: string[];
+  /** Better Auth rate limiting. Unset: Better Auth's default (on when NODE_ENV=production). Tests turn it off. */
+  rateLimitEnabled?: boolean;
   email?: TransactionalEmailProvider;
   onEmailError?: (error: unknown) => void;
   beforeDeleteUser?: (userId: string) => Promise<void>;
@@ -44,6 +46,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     database: prismaAdapter(prisma, { provider: "postgresql" }),
     // Self-host: friends + host retries shouldn't lock out after a few attempts.
     rateLimit: {
+      ...(env.rateLimitEnabled === undefined ? {} : { enabled: env.rateLimitEnabled }),
       window: 60,
       max: 60,
     },
