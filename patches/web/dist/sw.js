@@ -1,7 +1,7 @@
 /* Rakijazios service worker: caches the app shell only.
  * Never caches /api, /rpc, /novnc, auth, WebSocket or any non-GET / cross-origin request:
  * those always go straight to the network. */
-const VERSION = "rk-shell-v1";
+const VERSION = "rk-shell-v2";
 const SHELL = ["/", "/site.webmanifest", "/icon-192.png", "/icon-512.png", "/favicon.ico"];
 const NEVER = [/^\/api(\/|$)/, /^\/rpc(\/|$)/, /^\/novnc(\/|$)/, /^\/\.well-known\//, /^\/sw\.js$/];
 const STATIC = /^\/(assets\/.+|[\w.-]+\.(js|css|png|ico|svg|webmanifest|woff2?))$/;
@@ -43,14 +43,27 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   if (!STATIC.test(url.pathname)) return;
-  // Hashed build assets never change: cache first. Overlays/icons: stale-while-revalidate.
-  const immutable = url.pathname.startsWith("/assets/");
+  // Hashed build assets (/assets/*) never change: cache first.
+  // Everything else (overlay/patch scripts, icons, manifest) is replaced in place on deploy:
+  // network first, so one reload runs the new code; the cache is only an offline fallback.
+  if (url.pathname.startsWith("/assets/")) {
+    event.respondWith(
+      caches.open(VERSION).then(async (cache) => {
+        const hit = await cache.match(req);
+        if (hit) return hit;
+        const res = await fetch(req);
+        if (cacheable(res)) cache.put(req, res.clone());
+        return res;
+      }),
+    );
+    return;
+  }
   event.respondWith(
-    caches.open(VERSION).then(async (cache) => {
-      const hit = await cache.match(req);
-      const net = fetch(req).then((res) => { if (cacheable(res)) cache.put(req, res.clone()); return res; });
-      if (hit) { if (!immutable) event.waitUntil(net.catch(() => {})); return hit; }
-      return net;
-    }),
+    fetch(req)
+      .then((res) => {
+        if (cacheable(res)) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
+        return res;
+      })
+      .catch(() => caches.open(VERSION).then((c) => c.match(req, { ignoreSearch: true })).then((r) => r || Response.error())),
   );
 });

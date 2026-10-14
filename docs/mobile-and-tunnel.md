@@ -15,8 +15,10 @@ Two independent parts:
 | Piece | What it does |
 |---|---|
 | `site.webmanifest` | Name "Rakijazios", start `/app`, standalone, theme `#0d0d0e`; icons 192/512 (`any`) and 192/512 (`maskable`), made from `docs/assets/logo.png` |
-| `sw.js` | Caches the **app shell only**: `/`, hashed `/assets/*` (cache-first), overlays/icons (stale-while-revalidate). Page loads are network-first, so a deploy shows up on the next load; the cached shell is used only when offline. **Never** touches `/api`, `/rpc`, `/novnc`, `/.well-known`, WebSockets, non-GET or cross-origin requests; those always go to the network. Redirected or `no-store` responses are never stored. |
+| `sw.js` | Caches the **app shell only**. Hashed `/assets/*`: cache-first (they never change). Page loads **and** overlay/patch scripts, icons, manifest: **network-first**, so one reload after a deploy runs the new code; the cache is only the offline fallback. **Never** touches `/api`, `/rpc`, `/novnc`, `/.well-known`, WebSockets, non-GET or cross-origin requests; those always go to the network. Redirected or `no-store` responses are never stored. |
 | `pwa-overlay.js` | Registers the worker (secure origins only). On Android/Chromium, shows an "Install Rakijazios on this phone" bar (Install / Not now, remembered) under the header. Also has the phone layout fixes (composer width, full-screen settings, settings tab strip). |
+
+**Deploying an overlay:** after changing any `patches/web/dist/*.js`, run `node scripts/stamp-overlays.mjs` (or with the live dist dir). It sets a content-hash `?v=` on every overlay `<script>` in `index.html`.
 
 Rolling back the worker: bump `VERSION` in `sw.js` (old caches are deleted on activate), or ship an `sw.js` that
 calls `self.registration.unregister()`.
