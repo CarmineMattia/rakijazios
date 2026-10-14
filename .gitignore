@@ -10,3 +10,10 @@ patches/web/dist.broken/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Cloudflare Tunnel: credentials and tokens never go in the repo
+cloudflared.env
+.cloudflared/
+infra/cloudflared/*.json
+infra/cloudflared/config.yml
+cert.pem

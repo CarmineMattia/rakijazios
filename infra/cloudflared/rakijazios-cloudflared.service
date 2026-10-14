@@ -1,0 +1,18 @@
+# Rakijazios: cloudflared as a systemd USER service (alternative to the compose sidecar).
+# Install: cp infra/cloudflared/rakijazios-cloudflared.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload && systemctl --user enable --now rakijazios-cloudflared
+#          loginctl enable-linger $USER   # keep it running after logout
+# Reads ~/.cloudflared/config.yml (from config.example.yml). No token or credentials in this file.
+[Unit]
+Description=Rakijazios Cloudflare Tunnel (outbound only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/cloudflared --no-autoupdate --config %h/.cloudflared/config.yml tunnel run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
