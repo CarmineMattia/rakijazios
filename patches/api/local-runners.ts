@@ -82,6 +82,67 @@ const IDLE_TIMEOUT_MS = 5 * 60_000;
 /** How often in-flight answers are checked against their run (cancelled/finished runs stop). */
 const RUN_SWEEP_MS = 10_000;
 const MAX_IN_FLIGHT = 2;
+
+/** M3: owner limits for one computer. Rate and daily cap apply to other people, not the owner. */
+export type DeviceLimits = { maxConcurrent: number; perUserPerMinute: number; dailyRequestCap: number | null };
+export const DEFAULT_LIMITS: DeviceLimits = { maxConcurrent: MAX_IN_FLIGHT, perUserPerMinute: 20, dailyRequestCap: null };
+export const LIMIT_BOUNDS = { maxConcurrent: [1, 8], perUserPerMinute: [1, 600], dailyRequestCap: [1, 100_000] } as const;
+
+/** Validates an owner's limits update; returns an error message or the new limits. */
+export function normalizeLimits(input: unknown, current: DeviceLimits = DEFAULT_LIMITS): DeviceLimits | string {
+  const body = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const out = { ...current };
+  const int = (key: "maxConcurrent" | "perUserPerMinute" | "dailyRequestCap", label: string): string | null => {
+    if (!(key in body)) return null;
+    const v = body[key];
+    if (key === "dailyRequestCap" && (v === null || v === "")) {
+      out.dailyRequestCap = null;
+      return null;
+    }
+    const [min, max] = LIMIT_BOUNDS[key];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) return `${label} must be a whole number from ${min} to ${max}`;
+    out[key] = v;
+    return null;
+  };
+  return (
+    int("maxConcurrent", "Answers at the same time") ??
+    int("perUserPerMinute", "Requests per person per minute") ??
+    int("dailyRequestCap", "Daily requests from other people") ??
+    out
+  );
+}
+
+export type LimitRefusal = "busy" | "rate_limited" | "daily_cap";
+
+/** Pure M3 decision: may one more request start on this computer now? */
+export function decideLimit(input: {
+  limits: DeviceLimits;
+  inFlight: number;
+  isOwner: boolean;
+  /** This person's requests on this computer in the last 60 s. */
+  recentRequests: number;
+  /** Requests from people other than the owner on this computer today. */
+  todayPeerRequests: number;
+}): LimitRefusal | null {
+  if (input.inFlight >= input.limits.maxConcurrent) return "busy";
+  if (input.isOwner) return null;
+  if (input.recentRequests >= input.limits.perUserPerMinute) return "rate_limited";
+  if (input.limits.dailyRequestCap !== null && input.todayPeerRequests >= input.limits.dailyRequestCap) return "daily_cap";
+  return null;
+}
+
+/** OpenAI-style usage from a streamed SSE line (`data: {..."usage":{...}}`), if any. */
+export function usageFromSseLine(line: string): { input: number; output: number } | null {
+  if (!line.startsWith("data:") || !line.includes('"usage"')) return null;
+  try {
+    const u = (JSON.parse(line.slice(5).trim()) as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } }).usage;
+    if (!u) return null;
+    const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0);
+    return { input: n(u.prompt_tokens), output: n(u.completion_tokens) };
+  } catch {
+    return null;
+  }
+}
 const OFFLINE_MESSAGE =
   "This bot runs on the owner's computer, which is offline right now. Try again later.";
 
@@ -110,6 +171,12 @@ type PendingInfer = {
   chunks: string[];
   /** At least one token arrived (the answer is streaming). */
   streamed?: boolean;
+  /** M3 usage accounting. */
+  deviceId?: string;
+  consumerUserId?: string;
+  model?: string;
+  startedAt?: number;
+  usage?: { input: number; output: number };
   status?: number;
   error?: { message: string; retryable: boolean };
   done: boolean;
@@ -292,6 +359,35 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (bot_id, group_id)
       )`);
+      // M3 (additive): owner limits per computer, and one usage row per answer request.
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_limits (
+        device_id TEXT PRIMARY KEY REFERENCES local_runner_devices(id) ON DELETE CASCADE,
+        max_concurrent INT NOT NULL DEFAULT 2,
+        per_user_per_minute INT NOT NULL DEFAULT 20,
+        daily_request_cap INT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS local_runner_usage (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        consumer_user_id TEXT,
+        bot_id TEXT,
+        run_id TEXT,
+        group_id TEXT,
+        model_id TEXT,
+        status TEXT NOT NULL,
+        input_tokens INT NOT NULL DEFAULT 0,
+        output_tokens INT NOT NULL DEFAULT 0,
+        duration_ms INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      await prisma.$executeRawUnsafe(
+        `CREATE INDEX IF NOT EXISTS local_runner_usage_device_idx ON local_runner_usage (device_id, created_at)`,
+      );
+      await prisma.$executeRawUnsafe(
+        `CREATE INDEX IF NOT EXISTS local_runner_usage_owner_idx ON local_runner_usage (owner_user_id, created_at)`,
+      );
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -351,7 +447,8 @@ export async function loadSharedLocalAccessRow(
                        AND cg."archivedAt" IS NULL) AS group_granted,
             bb.device_id AS bind_device_id, bb.model_id AS bind_model_id,
             d.user_id AS device_user_id, d.status AS device_status, d.enabled AS device_enabled,
-            m.enabled AS model_enabled, m.advertised AS model_advertised, m.context_window AS model_context_window
+            m.enabled AS model_enabled, m.advertised AS model_advertised, m.context_window AS model_context_window,
+            COALESCE((SELECT a.user_id FROM group_message_authors a WHERE a.message_id = r."sourceMessageId" LIMIT 1), r."userId") AS consumer_user_id
        FROM runs r
        JOIN bots b ON b.id = r."botId"
        LEFT JOIN threads t ON t.id = r."threadId"
@@ -403,6 +500,8 @@ export type LocalRunnerGateway = {
   disconnectDevice: (deviceId: string, reason: string) => void;
   /** M2b: models this computer can serve right now (advertised live AND switched on). */
   offeredModels: (deviceId: string) => string[];
+  /** M3: forget cached limits after the owner changed them. */
+  invalidateLimits: (deviceId: string) => void;
   /** Health: ask the runner to re-check its model server now (8 s timeout). */
   checkDevice: (deviceId: string) => Promise<DeviceCheckResult>;
   /** M2c: stop in-flight answers of a bot in a group (grant revoked). Returns how many. */
@@ -481,6 +580,29 @@ export function createLocalRunnerGateway(deps: {
     return st;
   };
   const checks = new Map<string, { deviceId: string; resolve: (h: RunnerHealth | null) => void }>();
+  // M3: owner limits (cached 30 s, dropped on change) and per-person request times (last 60 s).
+  const limitsCache = new Map<string, { limits: DeviceLimits; at: number }>();
+  const recent = new Map<string, number[]>();
+  async function limitsFor(deviceId: string): Promise<DeviceLimits> {
+    const hit = limitsCache.get(deviceId);
+    if (hit && Date.now() - hit.at < 30_000) return hit.limits;
+    const rows = await deps.prisma.$queryRawUnsafe<Array<{ max_concurrent: number; per_user_per_minute: number; daily_request_cap: number | null }>>(
+      `SELECT max_concurrent, per_user_per_minute, daily_request_cap FROM local_runner_limits WHERE device_id = $1`,
+      deviceId,
+    );
+    const r = rows[0];
+    const limits = r
+      ? { maxConcurrent: r.max_concurrent, perUserPerMinute: r.per_user_per_minute, dailyRequestCap: r.daily_request_cap }
+      : DEFAULT_LIMITS;
+    limitsCache.set(deviceId, { limits, at: Date.now() });
+    return limits;
+  }
+  function recentCount(key: string, now: number): number {
+    const list = (recent.get(key) ?? []).filter((t) => now - t < 60_000);
+    if (list.length) recent.set(key, list);
+    else recent.delete(key);
+    return list.length;
+  }
   const failedHellos = new Map<string, { count: number; resetAt: number }>();
   const wsMod = loadWs();
   const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
@@ -540,9 +662,22 @@ export function createLocalRunnerGateway(deps: {
     for (const w of waiters) w();
   }
 
+  function recordUsage(p: PendingInfer, status: string): void {
+    if (!p.deviceId) return;
+    void deps.prisma
+      .$executeRawUnsafe(
+        `INSERT INTO local_runner_usage (id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status, input_tokens, output_tokens, duration_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        p.id, p.deviceId, p.ownerUserId, p.consumerUserId ?? null, p.botId, p.runId, p.groupId, p.model ?? null, status,
+        p.usage?.input ?? 0, p.usage?.output ?? 0, Math.max(0, Date.now() - (p.startedAt ?? Date.now())),
+      )
+      .catch(() => undefined);
+  }
+
   function failPending(id: string, message: string, retryable: boolean): void {
     const p = pending.get(id);
     if (!p || p.done) return;
+    recordUsage(p, message === "Cancelled" || /run_ended|cancel/i.test(message) ? "cancelled" : "error");
     p.done = true;
     p.error = { message, retryable };
     clearTimeout(p.hardTimer);
@@ -552,6 +687,7 @@ export function createLocalRunnerGateway(deps: {
   function completePending(id: string, status: number): void {
     const p = pending.get(id);
     if (!p || p.done) return;
+    recordUsage(p, status < 400 ? "ok" : "error");
     p.done = true;
     p.status = status;
     clearTimeout(p.hardTimer);
@@ -734,6 +870,8 @@ export function createLocalRunnerGateway(deps: {
           if (p && !p.done && session.inFlight.has(id)) {
             p.lastChunkAt = Date.now();
             p.streamed = true;
+            const u = usageFromSseLine(dataLine);
+            if (u) p.usage = u;
             p.chunks.push(dataLine);
             wake(p);
           }
@@ -810,10 +948,23 @@ export function createLocalRunnerGateway(deps: {
     }
     if (!session.enabled) return "paused";
     if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
-    return session.inFlight.size < MAX_IN_FLIGHT ? session : "busy";
+    // M3: the owner's concurrency limit is checked in proxyChatCompletions (async).
+    return session.inFlight.size < LIMIT_BOUNDS.maxConcurrent[1] ? session : "busy";
   }
 
-  function liveError(kind: "busy" | "paused" | "no_model" | undefined): Response {
+  function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | undefined): Response {
+    if (kind === "rate_limited") {
+      return Response.json(
+        { error: { message: "[shared_local_rate_limited] Too many requests to the owner's computer this minute.", type: "shared_local_rate_limited" } },
+        { status: 429, headers: { "retry-after": "60" } },
+      );
+    }
+    if (kind === "daily_cap") {
+      return Response.json(
+        { error: { message: "[shared_local_daily_cap] The owner's daily limit for this computer is used up.", type: "shared_local_daily_cap" } },
+        { status: 429 },
+      );
+    }
     if (kind === "busy") {
       return Response.json(
         { error: { message: "[shared_local_busy] Owner's local runner is busy. Try again shortly.", type: "shared_local_busy" } },
@@ -842,7 +993,7 @@ export function createLocalRunnerGateway(deps: {
 
   /** Token signature + a fresh database check of the run and everything it touches. */
   async function authorize(header: string, requestedModel?: string): Promise<
-    | { ok: true; ownerUserId: string; runId: string; access: Extract<SharedLocalAccess, { ok: true }> }
+    | { ok: true; ownerUserId: string; runId: string; access: Extract<SharedLocalAccess, { ok: true }>; consumerUserId: string }
     | { ok: false; response: Response }
   > {
     const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -859,7 +1010,7 @@ export function createLocalRunnerGateway(deps: {
         response: Response.json({ error: { message: access.message, type: access.type } }, { status: access.status }),
       };
     }
-    return { ok: true, ownerUserId: verified.ownerUserId, runId: verified.runId, access };
+    return { ok: true, ownerUserId: verified.ownerUserId, runId: verified.runId, access, consumerUserId: row?.consumer_user_id || verified.ownerUserId };
   }
 
   // Answers whose run has finished or been cancelled stop at once: the token is
@@ -903,6 +1054,7 @@ export function createLocalRunnerGateway(deps: {
     access: { deviceId: string; botId: string; groupId: string | null },
     body: Record<string, unknown>,
     signal: AbortSignal,
+    consumerUserId: string = ownerUserId,
   ): Promise<Response> {
     const model = typeof body.model === "string" ? body.model : "";
     if (!model) {
@@ -912,6 +1064,34 @@ export function createLocalRunnerGateway(deps: {
     if (!picked || typeof picked === "string") return liveError(picked);
     if (picked.userId !== ownerUserId) return liveError(undefined);
     const session = picked;
+
+    // M3 limits: owner's concurrency for everyone; per-person rate and daily cap for others.
+    const limits = await limitsFor(access.deviceId);
+    const isOwner = consumerUserId === ownerUserId;
+    const now = Date.now();
+    const rateKey = `${access.deviceId}|${consumerUserId}`;
+    let todayPeer = 0;
+    if (!isOwner && limits.dailyRequestCap !== null) {
+      const rows = await deps.prisma.$queryRawUnsafe<Array<{ n: number }>>(
+        `SELECT COUNT(*)::int AS n FROM local_runner_usage
+          WHERE device_id = $1 AND consumer_user_id IS DISTINCT FROM owner_user_id
+            AND status IN ('ok', 'error', 'cancelled') AND created_at >= date_trunc('day', NOW())`,
+        access.deviceId,
+      );
+      todayPeer = rows[0]?.n ?? 0;
+    }
+    const refusal = decideLimit({ limits, inFlight: session.inFlight.size, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer });
+    if (refusal) {
+      void deps.prisma
+        .$executeRawUnsafe(
+          `INSERT INTO local_runner_usage (id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          randomUUID(), access.deviceId, ownerUserId, consumerUserId, access.botId, runId, access.groupId, model, `refused_${refusal}`,
+        )
+        .catch(() => undefined);
+      return liveError(refusal);
+    }
+    if (!isOwner) recent.set(rateKey, [...(recent.get(rateKey) ?? []), now]);
 
     const id = randomUUID();
     const p: PendingInfer = {
@@ -924,6 +1104,10 @@ export function createLocalRunnerGateway(deps: {
       chunks: [],
       done: false,
       waiters: [],
+      deviceId: access.deviceId,
+      consumerUserId,
+      model,
+      startedAt: Date.now(),
       hardTimer: setTimeout(() => {
         failPending(id, "Inference hard timeout (30 min)", false);
         try {
@@ -955,7 +1139,8 @@ export function createLocalRunnerGateway(deps: {
           type: "infer.request",
           id,
           model,
-          body: { ...body, stream: true },
+          // Ask for token counts in the final chunk (OpenAI-compatible servers; ignored otherwise).
+          body: { ...body, stream: true, stream_options: { include_usage: true, ...((body.stream_options as object) ?? {}) } },
         }),
       );
     } catch {
@@ -1064,6 +1249,9 @@ export function createLocalRunnerGateway(deps: {
         ...common,
       };
     },
+    invalidateLimits(deviceId: string) {
+      limitsCache.delete(deviceId);
+    },
     async checkDevice(deviceId: string): Promise<DeviceCheckResult> {
       const session = sessionsByDevice.get(deviceId);
       if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return { online: false };
@@ -1170,7 +1358,7 @@ export function createLocalRunnerGateway(deps: {
         const model = typeof body.model === "string" ? body.model : "";
         const auth = await authorize(c.req.header("authorization") ?? "", model || undefined);
         if (!auth.ok) return auth.response;
-        return proxyChatCompletions(auth.ownerUserId, auth.runId, auth.access, body, c.req.raw.signal);
+        return proxyChatCompletions(auth.ownerUserId, auth.runId, auth.access, body, c.req.raw.signal, auth.consumerUserId);
       });
     },
     attachUpgrade(server: HttpServer) {
