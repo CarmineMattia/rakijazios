@@ -13,7 +13,7 @@
  *   POST /api/local-runners/devices/:id/rotate                    → new code for the same computer
  *   POST /api/local-runners/devices/:id/revoke
  *   POST /api/local-runners/devices/:id/check                     → re-check the computer now (health)
- *   POST /api/local-runners/devices/:id/limits   {maxConcurrent?, perUserPerMinute?, dailyRequestCap?: number|null}
+ *   POST /api/local-runners/devices/:id/limits   {maxConcurrent?, perUserPerMinute?, dailyRequestCap?, personDailyCap?, dailyTokenCap? (caps: number|null)}
  *   GET  /api/local-runners/usage?days=14                          → owner's usage per day / computer / person
  * Runner (no cookie; the one-time code is the credential):
  *   POST /api/local-runners/pair                     {code, name, platform, runnerVersion, existing?}
@@ -27,11 +27,11 @@ import type { PrismaClient } from "@rakazo/db";
 import type { Context, Hono } from "hono";
 import type { LocalRunnerGateway } from "./local-runners.js";
 import {
-  DEFAULT_LIMITS,
   ensureLocalRunnerTables,
   iso,
   LATEST_RUNNER_VERSION,
   LIMIT_BOUNDS,
+  limitsFromRow,
   normalizeLimits,
   runnerUpdateAvailable,
   type DeviceLimits,
@@ -301,15 +301,12 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
           )
         : [];
       const limitRows = devices.length
-        ? await prisma.$queryRawUnsafe<Array<{ device_id: string; max_concurrent: number; per_user_per_minute: number; daily_request_cap: number | null }>>(
-            `SELECT device_id, max_concurrent, per_user_per_minute, daily_request_cap FROM local_runner_limits WHERE device_id = ANY($1::text[])`,
+        ? await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+            `SELECT * FROM local_runner_limits WHERE device_id = ANY($1::text[])`,
             devices.map((d) => d.id),
           )
         : [];
-      const limitsOf = (id: string): DeviceLimits => {
-        const r = limitRows.find((x) => x.device_id === id);
-        return r ? { maxConcurrent: r.max_concurrent, perUserPerMinute: r.per_user_per_minute, dailyRequestCap: r.daily_request_cap } : DEFAULT_LIMITS;
-      };
+      const limitsOf = (id: string): DeviceLimits => limitsFromRow(limitRows.find((x) => x.device_id === id));
       return c.json({
         maxDevices: MAX_DEVICES_PER_USER,
         limitBounds: LIMIT_BOUNDS,
@@ -513,23 +510,24 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
       const uid = await userId(c);
       const device = await ownedDevice(uid, c.req.param("id")!);
       const body = await readBody(c);
-      const rows = await prisma.$queryRawUnsafe<Array<{ max_concurrent: number; per_user_per_minute: number; daily_request_cap: number | null }>>(
-        `SELECT max_concurrent, per_user_per_minute, daily_request_cap FROM local_runner_limits WHERE device_id = $1`,
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+        `SELECT * FROM local_runner_limits WHERE device_id = $1`,
         device.id,
       );
-      const current = rows[0]
-        ? { maxConcurrent: rows[0].max_concurrent, perUserPerMinute: rows[0].per_user_per_minute, dailyRequestCap: rows[0].daily_request_cap }
-        : DEFAULT_LIMITS;
+      const current = limitsFromRow(rows[0]);
       const next = normalizeLimits(body, current);
       if (typeof next === "string") return c.json({ error: next }, 400);
       await prisma.$executeRawUnsafe(
-        `INSERT INTO local_runner_limits (device_id, max_concurrent, per_user_per_minute, daily_request_cap, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (device_id) DO UPDATE SET max_concurrent = $2, per_user_per_minute = $3, daily_request_cap = $4, updated_at = NOW()`,
+        `INSERT INTO local_runner_limits (device_id, max_concurrent, per_user_per_minute, daily_request_cap, person_daily_cap, daily_token_cap, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (device_id) DO UPDATE SET max_concurrent = $2, per_user_per_minute = $3, daily_request_cap = $4,
+           person_daily_cap = $5, daily_token_cap = $6, updated_at = NOW()`,
         device.id,
         next.maxConcurrent,
         next.perUserPerMinute,
         next.dailyRequestCap,
+        next.personDailyCap,
+        next.dailyTokenCap,
       );
       gateway.invalidateLimits(device.id);
       return c.json({ ok: true, limits: next });

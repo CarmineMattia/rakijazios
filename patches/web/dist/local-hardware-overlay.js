@@ -219,8 +219,13 @@
     const box = el("details", "", { className: "rk-hw-limits", data: { rk: "hw-limits" } });
     if (openLimits.has(d.id)) box.open = true;
     box.addEventListener("toggle", () => (box.open ? openLimits.add(d.id) : openLimits.delete(d.id)));
-    const l = d.limits || { maxConcurrent: 2, perUserPerMinute: 20, dailyRequestCap: null };
-    box.append(el("summary", `Limits: ${l.maxConcurrent} at a time · ${l.perUserPerMinute}/min per person · ${l.dailyRequestCap ? `${l.dailyRequestCap}/day` : "no daily cap"}`));
+    const l = d.limits || { maxConcurrent: 2, perUserPerMinute: 20, dailyRequestCap: null, personDailyCap: null, dailyTokenCap: null };
+    const caps = [
+      l.dailyRequestCap ? `${l.dailyRequestCap}/day` : null,
+      l.personDailyCap ? `${l.personDailyCap}/day per person` : null,
+      l.dailyTokenCap ? `${l.dailyTokenCap.toLocaleString()} tokens/day` : null,
+    ].filter(Boolean);
+    box.append(el("summary", `Limits: ${l.maxConcurrent} at a time · ${l.perUserPerMinute}/min per person · ${caps.length ? caps.join(" · ") : "no daily cap"}`));
     const field = (label, key, value, min, max, placeholder) => {
       const row = el("label", label);
       const input = el("input", "", { type: "number", value: value ?? "", attrs: { min: String(min), max: String(max), step: "1", ...(placeholder ? { placeholder } : {}) }, data: { "rk-limit": key } });
@@ -231,6 +236,8 @@
     const conc = field("Answers at the same time", "maxConcurrent", l.maxConcurrent, 1, 8);
     const rate = field("Requests per person per minute (other people)", "perUserPerMinute", l.perUserPerMinute, 1, 600);
     const cap = field("Daily requests from other people (empty = no cap)", "dailyRequestCap", l.dailyRequestCap, 1, 100000, "no cap");
+    const pcap = field("Daily requests per person (empty = no cap)", "personDailyCap", l.personDailyCap, 1, 100000, "no cap");
+    const tcap = field("Daily tokens from other people (empty = no cap)", "dailyTokenCap", l.dailyTokenCap, 1000, 1000000000, "no cap");
     box.append(el("p", "Your own bots are only limited by \"at the same time\". People in your shared groups get a clear notice when a limit is reached.", { className: "rk-hw-hint" }));
     const save = el("button", "Save limits", { type: "button", data: { rk: "hw-limits-save" } });
     const msg = el("span", "", { className: "rk-hw-hint", data: { rk: "hw-limits-msg" } });
@@ -238,7 +245,7 @@
       save.disabled = true;
       msg.textContent = "Saving…";
       try {
-        const body = { maxConcurrent: Number(conc.value), perUserPerMinute: Number(rate.value), dailyRequestCap: cap.value === "" ? null : Number(cap.value) };
+        const body = { maxConcurrent: Number(conc.value), perUserPerMinute: Number(rate.value), dailyRequestCap: cap.value === "" ? null : Number(cap.value), personDailyCap: pcap.value === "" ? null : Number(pcap.value), dailyTokenCap: tcap.value === "" ? null : Number(tcap.value) };
         const r = await api(`/devices/${encodeURIComponent(d.id)}/limits`, body);
         d.limits = r.limits;
         msg.textContent = "Saved.";
