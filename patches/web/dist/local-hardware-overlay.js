@@ -324,6 +324,7 @@
       parts.push(r.modelServerOk ? `Model server OK (${r.models} model${r.models === 1 ? "" : "s"})` : "Model server not answering on that computer");
     }
     if (h.inFlight) parts.push(`${h.inFlight} answering now`);
+    if (h.queued) parts.push(`${h.queued} waiting`);
     if (h.lastAnswerAt) parts.push(`last answer ${ago(h.lastAnswerAt)}`);
     if (h.lastFailure) parts.push(`last problem ${ago(h.lastFailure.at)}: ${h.lastFailure.message}`);
     else if (r && r.lastError) parts.push(`last problem ${ago(new Date(r.lastErrorAt).toISOString())}: ${r.lastError}`);

@@ -114,6 +114,64 @@ export function normalizeLimits(input: unknown, current: DeviceLimits = DEFAULT_
 
 export type LimitRefusal = "busy" | "rate_limited" | "daily_cap";
 
+/** M3b: how long a request may wait for a free slot, and how many may wait per computer. */
+export const QUEUE_WAIT_MS = 60_000;
+export const QUEUE_MAX = 8;
+
+/**
+ * M3b: first-come-first-served wait for a free answer slot on one computer.
+ * `free()` says whether a slot is free right now; the caller must take the slot
+ * synchronously after `"ok"` (no await in between), so two waiters never share one.
+ */
+export class SlotQueue {
+  private readonly queues = new Map<string, object[]>();
+  constructor(
+    private readonly opts: { waitMs: number; max: number; pollMs?: number } = { waitMs: QUEUE_WAIT_MS, max: QUEUE_MAX },
+  ) {}
+
+  waiting(key: string): number {
+    return this.queues.get(key)?.length ?? 0;
+  }
+
+  async acquire(key: string, free: () => boolean | "gone", signal?: AbortSignal): Promise<"ok" | "busy" | "gone" | "aborted"> {
+    const q = this.queues.get(key) ?? [];
+    const first = free();
+    if (first === "gone") return "gone";
+    if (!q.length && first) return "ok";
+    if (q.length >= this.opts.max) return "busy";
+    const ticket = {};
+    q.push(ticket);
+    this.queues.set(key, q);
+    const leave = () => {
+      const i = q.indexOf(ticket);
+      if (i >= 0) q.splice(i, 1);
+      if (!q.length) this.queues.delete(key);
+    };
+    const deadline = Date.now() + this.opts.waitMs;
+    const poll = this.opts.pollMs ?? 200;
+    for (;;) {
+      if (signal?.aborted) {
+        leave();
+        return "aborted";
+      }
+      const f = free();
+      if (f === "gone") {
+        leave();
+        return "gone";
+      }
+      if (f && q[0] === ticket) {
+        leave();
+        return "ok";
+      }
+      if (Date.now() >= deadline) {
+        leave();
+        return "busy";
+      }
+      await new Promise((r) => setTimeout(r, poll));
+    }
+  }
+}
+
 /** Pure M3 decision: may one more request start on this computer now? */
 export function decideLimit(input: {
   limits: DeviceLimits;
@@ -226,6 +284,8 @@ export type DeviceLiveInfo = {
   inFlight?: number;
   /** In-flight answers that already received tokens. */
   streaming?: number;
+  /** M3b: requests waiting for a free slot. */
+  queued?: number;
   answers?: number;
   lastAnswerAt?: number | null;
   lastFailure?: { message: string; at: number } | null;
@@ -582,6 +642,7 @@ export function createLocalRunnerGateway(deps: {
   const checks = new Map<string, { deviceId: string; resolve: (h: RunnerHealth | null) => void }>();
   // M3: owner limits (cached 30 s, dropped on change) and per-person request times (last 60 s).
   const limitsCache = new Map<string, { limits: DeviceLimits; at: number }>();
+  const slots = new SlotQueue();
   const recent = new Map<string, number[]>();
   async function limitsFor(deviceId: string): Promise<DeviceLimits> {
     const hit = limitsCache.get(deviceId);
@@ -1063,7 +1124,6 @@ export function createLocalRunnerGateway(deps: {
     const picked = deviceSession(access.deviceId, model);
     if (!picked || typeof picked === "string") return liveError(picked);
     if (picked.userId !== ownerUserId) return liveError(undefined);
-    const session = picked;
 
     // M3 limits: owner's concurrency for everyone; per-person rate and daily cap for others.
     const limits = await limitsFor(access.deviceId);
@@ -1080,7 +1140,33 @@ export function createLocalRunnerGateway(deps: {
       );
       todayPeer = rows[0]?.n ?? 0;
     }
-    const refusal = decideLimit({ limits, inFlight: session.inFlight.size, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer });
+    // Rate and daily cap first (concurrency is handled by the queue below).
+    let refusal: LimitRefusal | null = decideLimit({ limits, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer });
+    let session = picked;
+    if (!refusal) {
+      // M3b: when the computer is busy, wait briefly (FIFO) instead of refusing at once.
+      const got = await slots.acquire(
+        access.deviceId,
+        () => {
+          const s = deviceSession(access.deviceId, model);
+          if (!s || typeof s === "string") return s === "busy" ? false : "gone";
+          return s.inFlight.size < limits.maxConcurrent;
+        },
+        signal,
+      );
+      if (got === "aborted") return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+      if (got === "gone") {
+        const s = deviceSession(access.deviceId, model);
+        return liveError(typeof s === "string" ? s : undefined);
+      }
+      if (got === "busy") refusal = "busy";
+      else {
+        const s = deviceSession(access.deviceId, model);
+        if (!s || typeof s === "string") return liveError(s);
+        if (s.userId !== ownerUserId) return liveError(undefined);
+        session = s;
+      }
+    }
     if (refusal) {
       void deps.prisma
         .$executeRawUnsafe(
@@ -1245,6 +1331,7 @@ export function createLocalRunnerGateway(deps: {
         runnerVersion: session.runnerVersion || null,
         health: session.health,
         inFlight: session.inFlight.size,
+        queued: slots.waiting(deviceId),
         streaming: [...session.inFlight].filter((id) => pending.get(id)?.streamed).length,
         ...common,
       };
