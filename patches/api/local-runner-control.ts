@@ -13,6 +13,8 @@
  *   POST /api/local-runners/devices/:id/rotate                    → new code for the same computer
  *   POST /api/local-runners/devices/:id/revoke
  *   POST /api/local-runners/devices/:id/check                     → re-check the computer now (health)
+ *   POST /api/local-runners/devices/:id/limits   {maxConcurrent?, perUserPerMinute?, dailyRequestCap?, personDailyCap?, dailyTokenCap? (caps: number|null)}
+ *   GET  /api/local-runners/usage?days=14                          → owner's usage per day / computer / person
  * Runner (no cookie; the one-time code is the credential):
  *   POST /api/local-runners/pair                     {code, name, platform, runnerVersion, existing?}
  * Public installer files (no secrets):
@@ -24,7 +26,17 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@rakazo/db";
 import type { Context, Hono } from "hono";
 import type { LocalRunnerGateway } from "./local-runners.js";
-import { ensureLocalRunnerTables, iso, LATEST_RUNNER_VERSION, runnerUpdateAvailable } from "./local-runners.js";
+import {
+  ensureLocalRunnerTables,
+  iso,
+  LATEST_RUNNER_VERSION,
+  LIMIT_BOUNDS,
+  limitsFromRow,
+  USAGE_ROWS_SQL,
+  normalizeLimits,
+  runnerUpdateAvailable,
+  type DeviceLimits,
+} from "./local-runners.js";
 import {
   FailureLimiter,
   MAX_DEVICES_PER_USER,
@@ -289,8 +301,16 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
             uid,
           )
         : [];
+      const limitRows = devices.length
+        ? await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+            `SELECT * FROM local_runner_limits WHERE device_id = ANY($1::text[])`,
+            devices.map((d) => d.id),
+          )
+        : [];
+      const limitsOf = (id: string): DeviceLimits => limitsFromRow(limitRows.find((x) => x.device_id === id));
       return c.json({
         maxDevices: MAX_DEVICES_PER_USER,
+        limitBounds: LIMIT_BOUNDS,
         devices: devices.map((d) => {
           const live = gateway.deviceInfo(d.id);
           return {
@@ -302,11 +322,13 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
             platform: d.platform,
             runnerVersion: d.runner_version,
             latestRunnerVersion: LATEST_RUNNER_VERSION,
+            limits: limitsOf(d.id),
             updateAvailable: runnerUpdateAvailable(live.runnerVersion ?? d.runner_version),
             health: {
               report: live.health ?? null,
               inFlight: live.inFlight ?? 0,
               streaming: live.streaming ?? 0,
+              queued: live.queued ?? 0,
               answers: live.answers ?? 0,
               lastAnswerAt: iso(live.lastAnswerAt),
               lastFailure: live.lastFailure ? { message: live.lastFailure.message, at: iso(live.lastFailure.at) } : null,
@@ -480,6 +502,74 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
         return c.json({ online: true, supported: false, runnerVersion: result.runnerVersion, latestRunnerVersion: LATEST_RUNNER_VERSION, checkedAt: new Date().toISOString() });
       }
       return c.json({ online: true, supported: true, health: result.health, checkedAt: new Date().toISOString() });
+    }),
+  );
+
+  app.post(
+    "/api/local-runners/devices/:id/limits",
+    route(async (c) => {
+      const uid = await userId(c);
+      const device = await ownedDevice(uid, c.req.param("id")!);
+      const body = await readBody(c);
+      const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+        `SELECT * FROM local_runner_limits WHERE device_id = $1`,
+        device.id,
+      );
+      const current = limitsFromRow(rows[0]);
+      const next = normalizeLimits(body, current);
+      if (typeof next === "string") return c.json({ error: next }, 400);
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO local_runner_limits (device_id, max_concurrent, per_user_per_minute, daily_request_cap, person_daily_cap, daily_token_cap, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (device_id) DO UPDATE SET max_concurrent = $2, per_user_per_minute = $3, daily_request_cap = $4,
+           person_daily_cap = $5, daily_token_cap = $6, updated_at = NOW()`,
+        device.id,
+        next.maxConcurrent,
+        next.perUserPerMinute,
+        next.dailyRequestCap,
+        next.personDailyCap,
+        next.dailyTokenCap,
+      );
+      gateway.invalidateLimits(device.id);
+      return c.json({ ok: true, limits: next });
+    }),
+  );
+
+  app.get(
+    "/api/local-runners/usage",
+    route(async (c) => {
+      const uid = await userId(c);
+      await ensureLocalRunnerTables(prisma);
+      const days = Math.min(90, Math.max(1, Number.parseInt(c.req.query("days") ?? "14", 10) || 14));
+      const daily = await prisma.$queryRawUnsafe<Array<{ day: string; device_id: string; requests: number; refused: number; input_tokens: number; output_tokens: number; peer_requests: number }>>(
+        `SELECT to_char(day, 'YYYY-MM-DD') AS day, device_id,
+                COALESCE(SUM(n) FILTER (WHERE status NOT LIKE 'refused_%'), 0)::int AS requests,
+                COALESCE(SUM(n) FILTER (WHERE status LIKE 'refused_%'), 0)::int AS refused,
+                COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
+                COALESCE(SUM(n) FILTER (WHERE status NOT LIKE 'refused_%' AND consumer_user_id IS DISTINCT FROM owner_user_id), 0)::int AS peer_requests
+           FROM ${USAGE_ROWS_SQL} AS u
+          WHERE owner_user_id = $1 AND day >= (date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day')::date
+          GROUP BY 1, 2 ORDER BY 1, 2`,
+        uid,
+        days,
+      );
+      const people = await prisma.$queryRawUnsafe<Array<{ user_id: string | null; name: string | null; requests: number; refused: number; tokens: number }>>(
+        `SELECT u.consumer_user_id AS user_id, us.name,
+                COALESCE(SUM(u.n) FILTER (WHERE u.status NOT LIKE 'refused_%'), 0)::int AS requests,
+                COALESCE(SUM(u.n) FILTER (WHERE u.status LIKE 'refused_%'), 0)::int AS refused,
+                COALESCE(SUM(u.input_tokens + u.output_tokens), 0)::int AS tokens
+           FROM ${USAGE_ROWS_SQL} AS u LEFT JOIN "user" us ON us.id = u.consumer_user_id
+          WHERE u.owner_user_id = $1 AND u.day >= (date_trunc('day', NOW()) - ($2::int - 1) * INTERVAL '1 day')::date
+          GROUP BY 1, 2 ORDER BY requests DESC LIMIT 20`,
+        uid,
+        days,
+      );
+      return c.json({
+        days,
+        daily: daily.map((r) => ({ day: r.day, deviceId: r.device_id, requests: r.requests, refused: r.refused, inputTokens: r.input_tokens, outputTokens: r.output_tokens, peerRequests: r.peer_requests })),
+        people: people.map((p) => ({ you: p.user_id === uid, name: p.user_id === uid ? "You" : p.name || "Someone", requests: p.requests, refused: p.refused, tokens: p.tokens })),
+      });
     }),
   );
 

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Same pin as scripts/ci-test.sh: the app image Host-001 runs.
+  RAKAZO_APP_IMAGE: ghcr.io/elie222/rakazo/app@sha256:1a70f06cf3c7a3f5c7f53e15b62f3c0709b81520ed40e671a1acb2ffcc40654c
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Runner tests, typecheck, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+      - name: Pull app image
+        run: docker pull "$RAKAZO_APP_IMAGE"
+      - name: Checks
+        run: scripts/ci-test.sh

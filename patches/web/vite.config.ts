@@ -289,7 +289,15 @@ export default defineConfig(({ mode }) => {
     preview: {
       host: "0.0.0.0",
       port: Number(process.env.WEB_PORT ?? 5173),
-      allowedHosts: [previewHost],
+      // Rakijazios: extra public hostnames (e.g. a Cloudflare Tunnel), comma separated.
+      // ".trycloudflare.com" (leading dot) allows any quick-tunnel subdomain.
+      allowedHosts: [
+        previewHost,
+        ...(process.env.RAKAZO_ALLOWED_HOSTS ?? rootEnv.RAKAZO_ALLOWED_HOSTS ?? "")
+          .split(",")
+          .map((h) => h.trim())
+          .filter(Boolean),
+      ],
       proxy: {
         // Rakijazios M2a: local runners connect through the web origin. `xfwd` appends
         // the client address so the api can rate-limit pairing per client.

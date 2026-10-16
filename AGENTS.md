@@ -113,6 +113,10 @@ rakijazios/                      (local checkout on Host-001: ~/projects/rakazo-
 
 ## 🧪 Build, typecheck, test
 
+Run `bash scripts/ci-test.sh` for runner tests, API/adapters/auth typechecks, unit
+tests and overlay DOM tests against the pinned app image. Gateway regression tests
+use a synthetic database and loopback runner; they do not use the live stack.
+
 Nothing is built locally: checks run **inside the published app image**
 (`ghcr.io/elie222/rakazo/app:edge`, Node 22, vitest, tsc), with our patches mounted the same way
 Compose does. Run these from the repo root. They need Docker; host Node ≥ 22.18 only for the runner.

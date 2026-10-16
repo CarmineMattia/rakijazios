@@ -46,6 +46,7 @@
 | ✅ | **Rakijazios brand** + translated UI | Everywhere |
 | ✅ | **My hardware (M2a)**: connect a computer from the web in one step | Settings → My hardware |
 | ✅ | **Bots on my computer (M2b/M2c)**: pick a computer + model per bot, allow it per shared group | Settings → My hardware, Share |
+| ✅ | **Mobile PWA**: install on your phone, with a wider composer and full-screen settings | [Mobile setup](docs/mobile-and-tunnel.md) |
 | ✅ | **Runner health**: status line, "Check now", update hint | Settings → My hardware |
 | 🔮 | Set a password (optional), verified email domain | [Roadmap](docs/roadmap.md) |
 | 🔮 | Bot publishing + **marketplace** | [Roadmap](docs/roadmap.md) |
@@ -107,7 +108,7 @@
 |---|---|---|---|
 | ✅ | **M1** Local AI prototype | A bot answers from its owner's computer via an outbound runner | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | ✅ | **M2** Pairing UI + grants | ✅ M2a My hardware · ✅ M2b pick a computer per bot · ✅ M2c shared groups · ✅ runner health | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
-| 🚧 | **M3** Limits & usage | Fair-use limits and usage numbers for shared hardware (M3a in review: PR #16) | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
+| ✅ | **M3** Limits & usage | Limits, queued requests, per-person/token caps and usage history with daily summaries | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | 🔮 | **M4** Marketplace tie-in | Public bots that can run on shared hardware | [share-local-ai §10](docs/share-local-ai.md#10-implementation-plan) |
 | 🔮 | **M5** Device node app | Desktop/phone app: chat + one-click local model + built-in runner | [share-local-ai §13](docs/share-local-ai.md#13-vision-rakijazios-app-as-a-device-node-m5) |
 | 🔮 | **Bot marketplace** | Publish bots, find them, add them to your chats | [roadmap](docs/roadmap.md#bot-marketplace) |

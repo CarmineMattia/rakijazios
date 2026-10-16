@@ -51,6 +51,12 @@
   #${PANEL_ID} .rk-hw-status{margin-top:14px;padding:10px 12px;border-radius:10px;background:var(--muted,#18181b)}
   #${PANEL_ID} .rk-hw-err{color:#fca5a5}
   #${PANEL_ID} .rk-hw-ok{color:#3ec5a8;font-weight:600}
+  #${PANEL_ID} .rk-hw-limits{margin:8px 0;font-size:13px}
+  #${PANEL_ID} .rk-hw-limits label{display:flex;gap:8px;align-items:center;justify-content:space-between;margin:4px 0}
+  #${PANEL_ID} .rk-hw-limits input{width:90px}
+  #${PANEL_ID} .rk-hw-usage svg{display:block;margin:8px 0}
+  #${PANEL_ID} .rk-hw-usage table{font-size:12.5px;border-collapse:collapse}
+  #${PANEL_ID} .rk-hw-usage td{padding:2px 10px 2px 0}
   #${PANEL_ID} .rk-hw-hint{color:var(--muted-foreground,#a1a1aa);font-size:12.5px}
   #${PANEL_ID} details summary{cursor:pointer;color:var(--muted-foreground,#a1a1aa);font-size:12.5px;margin-top:8px}`;
   document.head.appendChild(style);
@@ -190,6 +196,9 @@
     const botsSection = el("div", "", { data: { rk: "hw-bots" } });
     p.append(botsSection);
     renderBots(botsSection, my).catch(() => {});
+    const usageSection = el("div", "", { data: { rk: "hw-usage" } });
+    p.append(usageSection);
+    renderUsage(usageSection, my, data.devices).catch(() => {});
     const refresh = () => {
       if (my !== epoch || view.kind !== "list" || settingsRoot()?.getAttribute("data-rk-hw") !== "1") return;
       // Do not redraw under the user's hands (an open picker or rename box).
@@ -203,6 +212,114 @@
     listTimer = setTimeout(refresh, 10_000);
   }
 
+  // Computers whose "Limits" section is open (kept across the 10 s list refresh).
+  const openLimits = new Set();
+
+  function limitsBlock(d) {
+    const box = el("details", "", { className: "rk-hw-limits", data: { rk: "hw-limits" } });
+    if (openLimits.has(d.id)) box.open = true;
+    box.addEventListener("toggle", () => (box.open ? openLimits.add(d.id) : openLimits.delete(d.id)));
+    const l = d.limits || { maxConcurrent: 2, perUserPerMinute: 20, dailyRequestCap: null, personDailyCap: null, dailyTokenCap: null };
+    const caps = [
+      l.dailyRequestCap ? `${l.dailyRequestCap}/day` : null,
+      l.personDailyCap ? `${l.personDailyCap}/day per person` : null,
+      l.dailyTokenCap ? `${l.dailyTokenCap.toLocaleString()} tokens/day` : null,
+    ].filter(Boolean);
+    box.append(el("summary", `Limits: ${l.maxConcurrent} at a time · ${l.perUserPerMinute}/min per person · ${caps.length ? caps.join(" · ") : "no daily cap"}`));
+    const field = (label, key, value, min, max, placeholder) => {
+      const row = el("label", label);
+      const input = el("input", "", { type: "number", value: value ?? "", attrs: { min: String(min), max: String(max), step: "1", ...(placeholder ? { placeholder } : {}) }, data: { "rk-limit": key } });
+      row.append(input);
+      box.append(row);
+      return input;
+    };
+    const conc = field("Answers at the same time", "maxConcurrent", l.maxConcurrent, 1, 8);
+    const rate = field("Requests per person per minute (other people)", "perUserPerMinute", l.perUserPerMinute, 1, 600);
+    const cap = field("Daily requests from other people (empty = no cap)", "dailyRequestCap", l.dailyRequestCap, 1, 100000, "no cap");
+    const pcap = field("Daily requests per person (empty = no cap)", "personDailyCap", l.personDailyCap, 1, 100000, "no cap");
+    const tcap = field("Daily tokens from other people (empty = no cap)", "dailyTokenCap", l.dailyTokenCap, 1000, 1000000000, "no cap");
+    box.append(el("p", "Your own bots are only limited by \"at the same time\". People in your shared groups get a clear notice when a limit is reached.", { className: "rk-hw-hint" }));
+    const save = el("button", "Save limits", { type: "button", data: { rk: "hw-limits-save" } });
+    const msg = el("span", "", { className: "rk-hw-hint", data: { rk: "hw-limits-msg" } });
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      msg.textContent = "Saving…";
+      try {
+        const body = { maxConcurrent: Number(conc.value), perUserPerMinute: Number(rate.value), dailyRequestCap: cap.value === "" ? null : Number(cap.value), personDailyCap: pcap.value === "" ? null : Number(pcap.value), dailyTokenCap: tcap.value === "" ? null : Number(tcap.value) };
+        const r = await api(`/devices/${encodeURIComponent(d.id)}/limits`, body);
+        d.limits = r.limits;
+        msg.textContent = "Saved.";
+      } catch (e) {
+        msg.textContent = e.message;
+      } finally {
+        save.disabled = false;
+      }
+    });
+    box.append(save, msg);
+    return box;
+  }
+
+  async function renderUsage(section, my, devices) {
+    let data;
+    try {
+      data = await api("/usage?days=14");
+    } catch {
+      return;
+    }
+    if (my !== epoch) return;
+    section.replaceChildren(el("h4", "Usage (last 14 days)"));
+    section.className = "rk-hw-usage";
+    const days = [];
+    for (let i = 13; i >= 0; i--) days.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+    const per = days.map((day) => {
+      const rows = data.daily.filter((r) => r.day === day);
+      const sum = (k) => rows.reduce((n, r) => n + r[k], 0);
+      return { day, requests: sum("requests"), peer: sum("peerRequests"), refused: sum("refused"), tokens: sum("inputTokens") + sum("outputTokens") };
+    });
+    const total = per.reduce((n, x) => n + x.requests, 0);
+    if (!total && !per.some((x) => x.refused)) {
+      section.append(el("p", "No answers from your computers yet.", { className: "rk-hw-hint", data: { rk: "hw-usage-empty" } }));
+      return;
+    }
+    const max = Math.max(1, ...per.map((x) => x.requests + x.refused));
+    const W = 14 * 22, H = 80, NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("width", String(W)); svg.setAttribute("height", String(H + 16)); svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `Answers per day, last 14 days: ${total} in total`);
+    svg.setAttribute("data-rk", "hw-usage-chart");
+    const rect = (x, y, w, h, fill, title) => {
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", w); r.setAttribute("height", Math.max(0, h)); r.setAttribute("fill", fill);
+      const t = document.createElementNS(NS, "title"); t.textContent = title; r.append(t);
+      svg.append(r);
+    };
+    per.forEach((x, i) => {
+      const own = x.requests - x.peer;
+      const hOwn = (own / max) * H, hPeer = (x.peer / max) * H, hRef = (x.refused / max) * H;
+      const label = `${x.day}: ${x.requests} answers (${x.peer} for other people), ${x.refused} refused, ${x.tokens} tokens`;
+      rect(i * 22 + 3, H - hOwn, 16, hOwn, "#60a5fa", label);
+      rect(i * 22 + 3, H - hOwn - hPeer, 16, hPeer, "#a78bfa", label);
+      rect(i * 22 + 3, H - hOwn - hPeer - hRef, 16, hRef, "#f87171", label);
+      if (i % 2 === 0) {
+        const t = document.createElementNS(NS, "text");
+        t.setAttribute("x", String(i * 22 + 2)); t.setAttribute("y", String(H + 13)); t.setAttribute("font-size", "9"); t.setAttribute("fill", "currentColor");
+        t.textContent = x.day.slice(5); svg.append(t);
+      }
+    });
+    section.append(svg);
+    const peer = per.reduce((n, x) => n + x.peer, 0), refused = per.reduce((n, x) => n + x.refused, 0), tokens = per.reduce((n, x) => n + x.tokens, 0);
+    section.append(el("p", `${total} answers (blue: you, purple: other people ${peer}), ${refused} refused by limits (red), ${tokens} tokens.`, { className: "rk-hw-hint", data: { rk: "hw-usage-total" } }));
+    if (data.people.length) {
+      const table = el("table", "", { data: { rk: "hw-usage-people" } });
+      for (const person of data.people) {
+        const tr = el("tr", "");
+        tr.append(el("td", person.name), el("td", `${person.requests} answers`), el("td", person.refused ? `${person.refused} refused` : ""), el("td", `${person.tokens} tokens`));
+        table.append(tr);
+      }
+      section.append(table);
+    }
+  }
+
   // Last "Check now" result per computer (kept across the 10 s list refresh).
   const checkResults = new Map();
 
@@ -214,6 +331,7 @@
       parts.push(r.modelServerOk ? `Model server OK (${r.models} model${r.models === 1 ? "" : "s"})` : "Model server not answering on that computer");
     }
     if (h.inFlight) parts.push(`${h.inFlight} answering now`);
+    if (h.queued) parts.push(`${h.queued} waiting`);
     if (h.lastAnswerAt) parts.push(`last answer ${ago(h.lastAnswerAt)}`);
     if (h.lastFailure) parts.push(`last problem ${ago(h.lastFailure.at)}: ${h.lastFailure.message}`);
     else if (r && r.lastError) parts.push(`last problem ${ago(new Date(r.lastErrorAt).toISOString())}: ${r.lastError}`);
@@ -265,6 +383,7 @@
     }
     const checkLine = el("div", checkText(checkResults.get(d.id)), { className: "rk-hw-hint", data: { rk: "hw-check-result" } });
     card.append(checkLine);
+    card.append(limitsBlock(d));
     rename.addEventListener("click", () => {
       const input = el("input", "", { type: "text", value: d.name, maxLength: 64 });
       const save = el("button", "Save", { type: "button" });
