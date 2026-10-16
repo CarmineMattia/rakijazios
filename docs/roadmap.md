@@ -55,8 +55,9 @@ done** unless ticked. Bigger items have a design doc in `docs/` with an **Open q
         As built: [`m2-plan.md` §14](m2-plan.md).
   - [x] **Runner health —** runner 0.2.3 health reports, "Check now", update hint.
         As built: [`m2-plan.md` §15](m2-plan.md).
-  - [ ] **M3 —** limits and usage. M3a (per-computer limits, usage rows, chart) is in review in
-        PR #16; M3b (retention, per-person and token caps, queueing) is planned.
+  - [x] **M3 —** limits and usage: per-computer limits, usage rows and chart, retention,
+        per-person and token caps, and queued requests. CSV export and timeout tuning
+        under load remain follow-up work.
 
 ## Bot marketplace
 

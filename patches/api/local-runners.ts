@@ -238,6 +238,23 @@ export function decideLimit(input: {
   return null;
 }
 
+/** Serialize quota decisions for one computer, without blocking other computers. */
+export class AdmissionLock {
+  private readonly tails = new Map<string, Promise<void>>();
+  async run<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    this.tails.set(key, tail);
+    await previous;
+    try { return await task(); }
+    finally {
+      release();
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+}
+
 /** OpenAI-style usage from a streamed SSE line (`data: {..."usage":{...}}`), if any. */
 export function usageFromSseLine(line: string): { input: number; output: number } | null {
   if (!line.startsWith("data:") || !line.includes('"usage"')) return null;
@@ -710,6 +727,12 @@ export function createLocalRunnerGateway(deps: {
   // M3: owner limits (cached 30 s, dropped on change) and per-person request times (last 60 s).
   const limitsCache = new Map<string, { limits: DeviceLimits; at: number }>();
   const slots = new SlotQueue();
+  const admissions = new AdmissionLock();
+  // Keep accepted requests visible to quota checks until their usage write is confirmed.
+  // SQL excludes the snapshot IDs, so a write completing during a query cannot count twice.
+  type UsageReservation = { id: string; deviceId: string; consumerUserId: string; ownerUserId: string; startedAt: number; usage?: { input: number; output: number } };
+  const reservations = new Map<string, UsageReservation>();
+  const waitingAccess = new Map<string, { botId: string; groupId: string | null; revoked: boolean }>();
   const recent = new Map<string, number[]>();
   async function limitsFor(deviceId: string): Promise<DeviceLimits> {
     const hit = limitsCache.get(deviceId);
@@ -789,13 +812,16 @@ export function createLocalRunnerGateway(deps: {
 
   function recordUsage(p: PendingInfer, status: string): void {
     if (!p.deviceId) return;
+    const reservation = reservations.get(p.id);
+    if (reservation) reservation.usage = p.usage;
     void deps.prisma
       .$executeRawUnsafe(
-        `INSERT INTO local_runner_usage (id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status, input_tokens, output_tokens, duration_ms)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        `INSERT INTO local_runner_usage (id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status, input_tokens, output_tokens, duration_ms, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         p.id, p.deviceId, p.ownerUserId, p.consumerUserId ?? null, p.botId, p.runId, p.groupId, p.model ?? null, status,
-        p.usage?.input ?? 0, p.usage?.output ?? 0, Math.max(0, Date.now() - (p.startedAt ?? Date.now())),
+        p.usage?.input ?? 0, p.usage?.output ?? 0, Math.max(0, Date.now() - (p.startedAt ?? Date.now())), new Date(p.startedAt ?? Date.now()),
       )
+      .then(() => { reservations.delete(p.id); })
       .catch(() => undefined);
   }
 
@@ -1064,9 +1090,10 @@ export function createLocalRunnerGateway(deps: {
 
   /**
    * M2b: the bound computer's live session, if it is online, not paused and
-   * offers the model right now. `busy` = online but already at MAX_IN_FLIGHT.
+   * offers the model right now. Concurrency is reserved by SlotQueue, including
+   * requests waiting at the maximum supported concurrency.
    */
-  function deviceSession(deviceId: string, model: string, reservedId?: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
+  function deviceSession(deviceId: string, model: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
     const session = sessionsByDevice.get(deviceId);
     if (!session) return undefined;
     if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
@@ -1076,8 +1103,7 @@ export function createLocalRunnerGateway(deps: {
     if (!session.enabled) return "paused";
     if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
     // M3: the owner's concurrency limit is checked in proxyChatCompletions (async).
-    const reserved = reservedId && session.inFlight.has(reservedId) ? 1 : 0;
-    return session.inFlight.size - reserved < LIMIT_BOUNDS.maxConcurrent[1] ? session : "busy";
+    return session;
   }
 
   function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | "person_cap" | undefined): Response {
@@ -1201,72 +1227,106 @@ export function createLocalRunnerGateway(deps: {
     // M3 limits: owner's concurrency for everyone; per-person rate and daily cap for others.
     const limits = await limitsFor(access.deviceId);
     const isOwner = consumerUserId === ownerUserId;
-    const now = Date.now();
     const rateKey = `${access.deviceId}|${consumerUserId}`;
-    let todayPeer = 0;
-    let todayPerson = 0;
-    let todayPeerTokens = 0;
-    if (!isOwner && (limits.dailyRequestCap !== null || limits.personDailyCap !== null || limits.dailyTokenCap !== null)) {
-      const rows = await deps.prisma.$queryRawUnsafe<Array<{ peer: number; person: number; tokens: number }>>(
-        `SELECT COUNT(*)::int AS peer,
-                COUNT(*) FILTER (WHERE consumer_user_id = $2)::int AS person,
-                COALESCE(SUM(input_tokens + output_tokens), 0)::bigint::float8 AS tokens
-           FROM local_runner_usage
-          WHERE device_id = $1 AND consumer_user_id IS DISTINCT FROM owner_user_id
-            AND status IN ('ok', 'error', 'cancelled') AND created_at >= date_trunc('day', NOW())`,
-        access.deviceId,
-        consumerUserId,
-      );
-      todayPeer = rows[0]?.peer ?? 0;
-      todayPerson = rows[0]?.person ?? 0;
-      todayPeerTokens = Number(rows[0]?.tokens ?? 0);
+    async function checkQuota(current: DeviceLimits): Promise<LimitRefusal | null> {
+      let todayPeer = 0;
+      let todayPerson = 0;
+      let todayPeerTokens = 0;
+      if (!isOwner && (current.dailyRequestCap !== null || current.personDailyCap !== null || current.dailyTokenCap !== null)) {
+        const local = [...reservations.values()].filter((r) => r.deviceId === access.deviceId);
+        const rows = await deps.prisma.$queryRawUnsafe<Array<{ peer: number; person: number; tokens: number; day_start: number }>>(
+          `SELECT COUNT(*)::int AS peer,
+                  COUNT(*) FILTER (WHERE consumer_user_id = $2)::int AS person,
+                  COALESCE(SUM(input_tokens + output_tokens), 0)::bigint::float8 AS tokens,
+                  EXTRACT(EPOCH FROM date_trunc('day', NOW()))::float8 * 1000 AS day_start
+             FROM local_runner_usage
+            WHERE device_id = $1 AND consumer_user_id IS DISTINCT FROM owner_user_id
+              AND status IN ('ok', 'error', 'cancelled') AND created_at >= date_trunc('day', NOW())
+              AND NOT (id = ANY($3::text[]))`,
+          access.deviceId, consumerUserId, local.map((r) => r.id),
+        );
+        const row = rows[0];
+        const dayStart = Number(row?.day_start ?? Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+        const today = local.filter((r) => r.startedAt >= dayStart && r.consumerUserId !== r.ownerUserId);
+        todayPeer = Number(row?.peer ?? 0) + today.length;
+        todayPerson = Number(row?.person ?? 0) + today.filter((r) => r.consumerUserId === consumerUserId).length;
+        todayPeerTokens = Number(row?.tokens ?? 0) + today.reduce((n, r) => n + (r.usage?.input ?? 0) + (r.usage?.output ?? 0), 0);
+      }
+      return decideLimit({ limits: current, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, Date.now()), todayPeerRequests: todayPeer, todayPersonRequests: todayPerson, todayPeerTokens });
     }
-    // Rate and daily cap first (concurrency is handled by the queue below).
-    let refusal: LimitRefusal | null = decideLimit({ limits, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer, todayPersonRequests: todayPerson, todayPeerTokens });
+    const revokedResponse = () => Response.json({ error: { message: "[shared_local_group_denied] This bot isn't enabled for this shared group any more.", type: "shared_local_group_denied" } }, { status: 403 });
+    let refusal = await checkQuota(limits);
     let session = picked;
     const id = randomUUID();
-    if (!refusal) {
-      // M3b: when the computer is busy, wait briefly (FIFO) instead of refusing at once.
-      const got = await slots.acquire(
-        access.deviceId,
-        () => {
-          const s = deviceSession(access.deviceId, model);
-          if (!s || typeof s === "string") return s === "busy" ? false : "gone";
-          session = s;
-          return s.inFlight.size < limits.maxConcurrent;
-        },
-        () => { session.inFlight.add(id); },
-        signal,
-      );
-      if (got === "aborted") return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
-      if (got === "gone") {
-        const s = deviceSession(access.deviceId, model);
-        return liveError(typeof s === "string" ? s : undefined);
-      }
-      if (got === "busy") refusal = "busy";
-      else {
-        const s = deviceSession(access.deviceId, model, id);
-        if (!s || typeof s === "string" || s !== session || s.userId !== ownerUserId) {
-          session.inFlight.delete(id);
-          return liveError(typeof s === "string" ? s : undefined);
+    const ticket = { botId: access.botId, groupId: access.groupId, revoked: false };
+    waitingAccess.set(id, ticket);
+    try {
+      if (!refusal) {
+        const got = await slots.acquire(
+          access.deviceId,
+          () => {
+            if (ticket.revoked) return "gone";
+            const live = deviceSession(access.deviceId, model);
+            if (!live || typeof live === "string") return live === "busy" ? false : "gone";
+            session = live;
+            return live.inFlight.size < (limitsCache.get(access.deviceId)?.limits ?? limits).maxConcurrent;
+          },
+          () => { session.inFlight.add(id); },
+          signal,
+        );
+        if (got === "aborted") return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+        if (ticket.revoked) { session.inFlight.delete(id); return revokedResponse(); }
+        if (got === "gone") {
+          const live = deviceSession(access.deviceId, model);
+          return liveError(typeof live === "string" ? live : undefined);
         }
-        if (signal.aborted) {
-          session.inFlight.delete(id);
-          return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+        if (got === "busy") refusal = "busy";
+        else {
+          // Recheck authorization and quotas after waiting, and reserve the accepted
+          // request before the next admission can inspect the same counters.
+          const denied = await admissions.run(access.deviceId, async (): Promise<Response | null> => {
+            const row = await loadSharedLocalAccessRow(deps.prisma, runId);
+            const fresh = decideSharedLocalAccess(ownerUserId, row, model);
+            if (!fresh.ok) return Response.json({ error: { message: fresh.message, type: fresh.type } }, { status: fresh.status });
+            if (fresh.deviceId !== access.deviceId || fresh.botId !== access.botId || fresh.groupId !== access.groupId || (row?.consumer_user_id || ownerUserId) !== consumerUserId) return revokedResponse();
+            const current = await limitsFor(access.deviceId);
+            refusal = await checkQuota(current);
+            const live = deviceSession(access.deviceId, model);
+            if (!live || typeof live === "string" || live !== session || live.userId !== ownerUserId || !session.inFlight.has(id)) return liveError(typeof live === "string" ? live : undefined);
+            if (ticket.revoked) return revokedResponse();
+            if (signal.aborted) return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+            if (session.inFlight.size > current.maxConcurrent) refusal = "busy";
+            if (!refusal) {
+              const startedAt = Date.now();
+              reservations.set(id, { id, deviceId: access.deviceId, consumerUserId, ownerUserId, startedAt });
+              if (!isOwner) recent.set(rateKey, [...(recent.get(rateKey) ?? []), startedAt]);
+            }
+            return null;
+          });
+          if (denied) { session.inFlight.delete(id); return denied; }
+          if (ticket.revoked || signal.aborted) {
+            session.inFlight.delete(id);
+            reservations.delete(id);
+            return ticket.revoked ? revokedResponse() : Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+          }
         }
       }
-    }
-    if (refusal) {
-      void deps.prisma
-        .$executeRawUnsafe(
+      if (refusal) {
+        session.inFlight.delete(id);
+        void deps.prisma.$executeRawUnsafe(
           `INSERT INTO local_runner_usage (id, device_id, owner_user_id, consumer_user_id, bot_id, run_id, group_id, model_id, status)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          randomUUID(), access.deviceId, ownerUserId, consumerUserId, access.botId, runId, access.groupId, model, `refused_${refusal}`,
-        )
-        .catch(() => undefined);
-      return liveError(refusal);
+          id, access.deviceId, ownerUserId, consumerUserId, access.botId, runId, access.groupId, model, `refused_${refusal}`,
+        ).catch(() => undefined);
+        return liveError(refusal);
+      }
+    } catch (error) {
+      session.inFlight.delete(id);
+      reservations.delete(id);
+      throw error;
+    } finally {
+      waitingAccess.delete(id);
     }
-    if (!isOwner) recent.set(rateKey, [...(recent.get(rateKey) ?? []), now]);
 
     const p: PendingInfer = {
       id,
@@ -1281,7 +1341,7 @@ export function createLocalRunnerGateway(deps: {
       deviceId: access.deviceId,
       consumerUserId,
       model,
-      startedAt: Date.now(),
+      startedAt: reservations.get(id)?.startedAt ?? Date.now(),
       hardTimer: setTimeout(() => {
         failPending(id, "Inference hard timeout (30 min)", false);
         try {
@@ -1480,6 +1540,11 @@ export function createLocalRunnerGateway(deps: {
     },
     cancelBotInGroup(botId: string, groupId: string): number {
       let n = 0;
+      for (const ticket of waitingAccess.values()) {
+        if (ticket.botId !== botId || ticket.groupId !== groupId || ticket.revoked) continue;
+        ticket.revoked = true;
+        n++;
+      }
       for (const p of [...pending.values()]) {
         if (p.done || p.botId !== botId || p.groupId !== groupId) continue;
         cancelPending(p.id, "[shared_local_group_denied] This bot isn't enabled for this shared group any more.");

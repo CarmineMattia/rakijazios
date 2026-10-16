@@ -10,7 +10,9 @@ async function fixture(fetch) {
   const dom=new JSDOM('<div id="rk-invite-root" class="rk-open"><div class="rk-card"></div></div>',{url:'http://localhost:5173/app/test',runScripts:'outside-only'});
   const observers=[], Observer=dom.window.MutationObserver;
   dom.window.MutationObserver=class extends Observer { constructor(cb){super(cb);observers.push(this);} };
-  dom.window.fetch=fetch; dom.window.eval(script);
+  dom.window.fetch=(path, options)=>path.startsWith('/api/local-runners/groups/')
+    ? Promise.resolve(response({bots:[]})) : fetch(path, options);
+  dom.window.eval(script);
   await until(()=>dom.window.document.querySelector('[data-rk-group-sharing] button'));
   return { dom, doc:dom.window.document, close:async()=>{observers.forEach(o=>o.disconnect());dom.window.close();await Promise.resolve();} };
 }

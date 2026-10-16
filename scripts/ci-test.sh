@@ -49,5 +49,11 @@ docker run --rm -u 0 --network none -e TESTS="${tests[*]}" "${mounts[@]}" "$IMAG
   exit $rc
 ' || fail=1
 
+echo "== overlay DOM tests"
+docker run --rm --network none -v "$ROOT:/r:ro,z" --entrypoint sh "$IMAGE" -c '
+  J=$(ls -d /app/node_modules/.pnpm/jsdom@*/node_modules/jsdom | head -1)
+  cd /r && RAKAZO_JSDOM_PATH=$J node --test tests/*.test.mjs
+' || fail=1
+
 [ "$fail" = 0 ] && echo "== ALL CHECKS PASSED" || echo "== CHECKS FAILED"
 exit "$fail"
