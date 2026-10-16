@@ -158,8 +158,8 @@ export const QUEUE_MAX = 8;
 
 /**
  * M3b: first-come-first-served wait for a free answer slot on one computer.
- * `free()` says whether a slot is free right now; the caller must take the slot
- * synchronously after `"ok"` (no await in between), so two waiters never share one.
+ * `claim()` reserves the slot synchronously, before the promise resolves.
+ * Both immediate callers and queued callers therefore observe the reservation.
  */
 export class SlotQueue {
   private readonly queues = new Map<string, object[]>();
@@ -171,11 +171,15 @@ export class SlotQueue {
     return this.queues.get(key)?.length ?? 0;
   }
 
-  async acquire(key: string, free: () => boolean | "gone", signal?: AbortSignal): Promise<"ok" | "busy" | "gone" | "aborted"> {
+  async acquire(key: string, free: () => boolean | "gone", claim: () => void, signal?: AbortSignal): Promise<"ok" | "busy" | "gone" | "aborted"> {
+    if (signal?.aborted) return "aborted";
     const q = this.queues.get(key) ?? [];
     const first = free();
     if (first === "gone") return "gone";
-    if (!q.length && first) return "ok";
+    if (!q.length && first) {
+      claim();
+      return "ok";
+    }
     if (q.length >= this.opts.max) return "busy";
     const ticket = {};
     q.push(ticket);
@@ -199,6 +203,7 @@ export class SlotQueue {
       }
       if (f && q[0] === ticket) {
         leave();
+        claim();
         return "ok";
       }
       if (Date.now() >= deadline) {
@@ -1061,7 +1066,7 @@ export function createLocalRunnerGateway(deps: {
    * M2b: the bound computer's live session, if it is online, not paused and
    * offers the model right now. `busy` = online but already at MAX_IN_FLIGHT.
    */
-  function deviceSession(deviceId: string, model: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
+  function deviceSession(deviceId: string, model: string, reservedId?: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
     const session = sessionsByDevice.get(deviceId);
     if (!session) return undefined;
     if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
@@ -1071,7 +1076,8 @@ export function createLocalRunnerGateway(deps: {
     if (!session.enabled) return "paused";
     if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
     // M3: the owner's concurrency limit is checked in proxyChatCompletions (async).
-    return session.inFlight.size < LIMIT_BOUNDS.maxConcurrent[1] ? session : "busy";
+    const reserved = reservedId && session.inFlight.has(reservedId) ? 1 : 0;
+    return session.inFlight.size - reserved < LIMIT_BOUNDS.maxConcurrent[1] ? session : "busy";
   }
 
   function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | "person_cap" | undefined): Response {
@@ -1218,6 +1224,7 @@ export function createLocalRunnerGateway(deps: {
     // Rate and daily cap first (concurrency is handled by the queue below).
     let refusal: LimitRefusal | null = decideLimit({ limits, inFlight: 0, isOwner, recentRequests: isOwner ? 0 : recentCount(rateKey, now), todayPeerRequests: todayPeer, todayPersonRequests: todayPerson, todayPeerTokens });
     let session = picked;
+    const id = randomUUID();
     if (!refusal) {
       // M3b: when the computer is busy, wait briefly (FIFO) instead of refusing at once.
       const got = await slots.acquire(
@@ -1225,8 +1232,10 @@ export function createLocalRunnerGateway(deps: {
         () => {
           const s = deviceSession(access.deviceId, model);
           if (!s || typeof s === "string") return s === "busy" ? false : "gone";
+          session = s;
           return s.inFlight.size < limits.maxConcurrent;
         },
+        () => { session.inFlight.add(id); },
         signal,
       );
       if (got === "aborted") return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
@@ -1236,10 +1245,15 @@ export function createLocalRunnerGateway(deps: {
       }
       if (got === "busy") refusal = "busy";
       else {
-        const s = deviceSession(access.deviceId, model);
-        if (!s || typeof s === "string") return liveError(s);
-        if (s.userId !== ownerUserId) return liveError(undefined);
-        session = s;
+        const s = deviceSession(access.deviceId, model, id);
+        if (!s || typeof s === "string" || s !== session || s.userId !== ownerUserId) {
+          session.inFlight.delete(id);
+          return liveError(typeof s === "string" ? s : undefined);
+        }
+        if (signal.aborted) {
+          session.inFlight.delete(id);
+          return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
+        }
       }
     }
     if (refusal) {
@@ -1254,7 +1268,6 @@ export function createLocalRunnerGateway(deps: {
     }
     if (!isOwner) recent.set(rateKey, [...(recent.get(rateKey) ?? []), now]);
 
-    const id = randomUUID();
     const p: PendingInfer = {
       id,
       ownerUserId,
