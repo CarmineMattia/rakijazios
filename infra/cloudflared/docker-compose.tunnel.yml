@@ -1,0 +1,29 @@
+# Rakijazios: Cloudflare Tunnel sidecar (opt-in). Gives Host-001 a public https URL without opening any port.
+# cloudflared dials OUT to Cloudflare; nothing listens on the host. See docs/mobile-and-tunnel.md.
+#
+# Use (after the steps in the doc):
+#   docker compose -f docker-compose.images.yml -f docker-compose.override.yml \
+#     -f infra/cloudflared/docker-compose.tunnel.yml up -d cloudflared
+#
+# The tunnel token is NOT in this repo. It lives in a file outside the checkout:
+#   ~/.config/rakijazios/cloudflared.env   (chmod 600)  containing one line:  TUNNEL_TOKEN=...
+services:
+  web:
+    environment:
+      # Public hostname(s) Vite's preview server must accept (comma separated), e.g.
+      # rakijazios.example.com  or  .trycloudflare.com  for a quick test. Set it in your shell or .env.
+      RAKAZO_ALLOWED_HOSTS: ${RAKAZO_ALLOWED_HOSTS:-}
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    env_file:
+      - ${RAKIJAZIOS_TUNNEL_ENV:-${HOME}/.config/rakijazios/cloudflared.env}
+    depends_on:
+      - web
+    # Reaches the web container (which proxies /api, /rpc and the runner WebSocket) on the compose network.
+    # In the Cloudflare dashboard set the public hostname's service to:  http://web:5173
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

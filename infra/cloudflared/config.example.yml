@@ -1,0 +1,17 @@
+# Rakijazios: cloudflared config TEMPLATE for a locally-managed tunnel (the `cloudflared tunnel login` path).
+# Copy to ~/.cloudflared/config.yml (outside this repo) and fill in the two placeholders.
+# Never commit the filled-in file or the <TUNNEL_ID>.json credentials file.
+tunnel: <TUNNEL_ID>
+credentials-file: /home/<user>/.cloudflared/<TUNNEL_ID>.json
+no-autoupdate: true
+metrics: 127.0.0.1:20241
+ingress:
+  # Everything goes to the web server on loopback; it proxies /api, /rpc, /novnc and
+  # /api/local-runners/ws (runner WebSocket) to the api itself.
+  - hostname: rakijazios.<your-domain>
+    service: http://127.0.0.1:5173
+    originRequest:
+      connectTimeout: 10s
+      # Streaming answers and runner WebSockets stay open for a long time.
+      keepAliveTimeout: 90s
+  - service: http_status:404
