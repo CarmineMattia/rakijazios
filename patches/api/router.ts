@@ -1105,6 +1105,20 @@ export function createRouter(deps: RouterDeps) {
             if (!inCatalog) {
               throw new ORPCError("BAD_REQUEST", { message: "Unknown model for that provider" });
             }
+          } else if (input.modelProvider === "shared-local") {
+            // M2b: shared-local only via binding API, or re-save when binding already matches.
+            const binding = await deps.prisma.$queryRawUnsafe<Array<{ model_id: string }>>(
+              `SELECT model_id FROM local_runner_bot_bindings
+               WHERE bot_id = $1 AND user_id = $2 AND model_id = $3`,
+              input.botId,
+              context.actor.userId,
+              input.modelId,
+            );
+            if (!binding[0]) {
+              throw new ORPCError("BAD_REQUEST", {
+                message: "Bind this bot to a computer in Settings → On my computer first",
+              });
+            }
           } else {
             const credential = await findModelCredential(
               deps.prisma,
