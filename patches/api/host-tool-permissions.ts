@@ -134,6 +134,15 @@ function parseAutoReviewList(raw: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
+/** Shell metacharacters that can chain or substitute another command. */
+const SHELL_META = /[;&|`$()<>\n\r\\]/;
+
+/**
+ * Auto-review. Block rules match anywhere (case-insensitive substring: more blocking is safe).
+ * Allow rules are anchored: the target must equal the rule or start with "rule " (argument
+ * boundary), and must not contain shell metacharacters, so "ls" doesn't allow
+ * "curl https://evil/ls" or "ls; curl evil". A rule may include the action ("run-command ls").
+ */
 export function matchAutoReview(
   commandOrTarget: string,
   allow: string[],
@@ -141,12 +150,18 @@ export function matchAutoReview(
   enabled: boolean,
 ): "allow" | "block" | null {
   if (!enabled) return null;
-  const hay = commandOrTarget.toLowerCase();
+  const hay = commandOrTarget.toLowerCase().trim();
   for (const rule of block) {
     if (hay.includes(rule.toLowerCase())) return "block";
   }
-  for (const rule of allow) {
-    if (hay.includes(rule.toLowerCase())) return "allow";
+  const space = hay.indexOf(" ");
+  const target = space >= 0 ? hay.slice(space + 1).trim() : "";
+  if (SHELL_META.test(target)) return null;
+  const anchored = (text: string, rule: string) => text === rule || text.startsWith(`${rule} `);
+  for (const raw of allow) {
+    const rule = raw.toLowerCase().trim();
+    if (!rule) continue;
+    if (anchored(target, rule) || anchored(hay, rule)) return "allow";
   }
   return null;
 }

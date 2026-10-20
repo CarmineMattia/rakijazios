@@ -7,6 +7,7 @@ import type { PrismaClient } from "@rakazo/db";
 import type { Context, Hono } from "hono";
 import type { LocalRunnerGateway } from "./local-runners.js";
 import { decideHostToolPermission, ensureHostToolPermissionTables } from "./host-tool-permissions.js";
+import { approvalView, claimApproval, registerApprovalHandler, requestApproval } from "./host-tool-approvals.js";
 
 type SessionAuth = {
   api: {
@@ -84,6 +85,103 @@ async function ensureParityTables(prisma: PrismaClient): Promise<void> {
 
 export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
   const { prisma, localRunnerGateway } = deps;
+
+  async function dispatchBackgroundShell(id: string, deviceId: string | null, command: string): Promise<boolean> {
+    // Prefer live host runner when a device is online; otherwise it stays queued for runner pickup.
+    if (!deviceId || !localRunnerGateway.deviceInfo(deviceId).online) return false;
+    try {
+      const result = await localRunnerGateway.invokeHostTool(deviceId, {
+        id: randomUUID(),
+        action: "run-command",
+        args: { command, cwd: ".", background: true, shellId: id },
+        timeoutMs: 5_000,
+      });
+      if (!result.ok) {
+        // refused on the computer (sandbox missing, escalation, ...) or failed to start
+        await prisma.$executeRawUnsafe(
+          `UPDATE background_shells SET status = 'failed', output_tail = $2, finished_at = NOW() WHERE id = $1`,
+          id,
+          String(result.error ?? "failed").slice(0, 2000),
+        );
+        return false;
+      }
+      const pid =
+        result.output && typeof result.output === "object" && "pid" in result.output
+          ? Number((result.output as { pid?: unknown }).pid)
+          : null;
+      if (Number.isFinite(pid)) {
+        await prisma.$executeRawUnsafe(`UPDATE background_shells SET pid = $2 WHERE id = $1`, id, pid);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function shellStatus(id: string): Promise<string> {
+    const rows = await prisma.$queryRawUnsafe<Array<{ status: string }>>(
+      `SELECT status FROM background_shells WHERE id = $1`,
+      id,
+    );
+    return rows[0]?.status ?? "unknown";
+  }
+
+  // Resume paused background shells when the owner allows them; fail them on deny / expiry.
+  registerApprovalHandler("background-shell", {
+    async onAllowed(row) {
+      const id = row.refId ?? "";
+      const command = String(row.payload.command ?? "");
+      if (!id || !command || !(await claimApproval(prisma, row.id))) return { status: await shellStatus(id) };
+      const moved = await prisma.$executeRawUnsafe(
+        `UPDATE background_shells SET status = 'running' WHERE id = $1 AND user_id = $2 AND status = 'pending_approval'`,
+        id,
+        row.userId,
+      );
+      if (!Number(moved)) return { status: await shellStatus(id) };
+      const dispatched = await dispatchBackgroundShell(id, row.deviceId, command);
+      if (!dispatched) {
+        await prisma.$executeRawUnsafe(
+          `UPDATE background_shells SET status = 'queued' WHERE id = $1 AND status = 'running'`,
+          id,
+        );
+      }
+      return { shellId: id, status: await shellStatus(id) };
+    },
+    async onFinal(row) {
+      if (!row.refId) return;
+      await prisma.$executeRawUnsafe(
+        `UPDATE background_shells SET status = $2, finished_at = NOW()
+         WHERE id = $1 AND status = 'pending_approval'`,
+        row.refId,
+        row.status === "expired" ? "expired" : "denied",
+      );
+    },
+  });
+
+  registerApprovalHandler("send-input", {
+    async onAllowed(row) {
+      const shellId = row.refId ?? "";
+      if (!shellId || !(await claimApproval(prisma, row.id))) return { sent: false };
+      const live = await prisma.$queryRawUnsafe<Array<{ status: string }>>(
+        `SELECT status FROM background_shells WHERE id = $1 AND user_id = $2`,
+        shellId,
+        row.userId,
+      );
+      if (live[0]?.status !== "running" || !localRunnerGateway.deviceInfo(row.deviceId).online) {
+        return { sent: false, error: "Shell is not running or the computer is offline" };
+      }
+      const result = await localRunnerGateway.invokeHostTool(row.deviceId, {
+        id: randomUUID(),
+        action: "send-input",
+        args: { shellId, text: String(row.payload.text ?? "") },
+        timeoutMs: 5_000,
+      });
+      return result.ok ? { sent: true } : { sent: false, error: result.error ?? "send-input failed" };
+    },
+    async onFinal() {
+      /* nothing to clean up: the input is simply not sent */
+    },
+  });
 
   function route(handler: (c: Context) => Promise<Response>) {
     return async (c: Context) => {
@@ -314,6 +412,8 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
         typeof body.deviceId === "string" && body.deviceId.trim()
           ? body.deviceId.slice(0, 64)
           : null;
+      // A shell always targets one specific computer, so the permission policy always applies.
+      if (!deviceId) throw new HttpError(400, "deviceId required");
       if (botId) {
         const bot = await prisma.bot.findFirst({
           where: { id: botId, userId: uid },
@@ -340,9 +440,36 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
           throw new HttpError(403, "Host tool denied by permission policy.");
         }
         if (decision.kind === "ask") {
+          // Paused: the shell row waits in pending_approval until the owner decides on the card.
+          const id = randomUUID();
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO background_shells
+               (id, user_id, bot_id, device_id, command, status, output_tail, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending_approval', '', NOW())`,
+            id,
+            uid,
+            botId,
+            deviceId,
+            command,
+          );
+          const approval = await requestApproval(prisma, {
+            userId: uid,
+            deviceId,
+            action: "run-command",
+            target: command,
+            payload: { command },
+            source: "background-shell",
+            refId: id,
+          });
           return c.json(
-            { error: "Host tool needs your approval.", needsPermission: true, action: "run-command" },
-            409,
+            {
+              id,
+              status: "pending_approval",
+              command,
+              needsPermission: true,
+              approval: approvalView(approval),
+            },
+            202,
           );
         }
       }
@@ -357,35 +484,12 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
         deviceId,
         command,
       );
-      // Prefer live host runner when a device is online; otherwise mark as queued for runner pickup.
-      let dispatched = false;
-      if (deviceId && localRunnerGateway.deviceInfo(deviceId).online) {
-        try {
-          const result = await localRunnerGateway.invokeHostTool(deviceId, {
-            id: randomUUID(),
-            action: "run-command",
-            args: { command, cwd: ".", background: true, shellId: id },
-            timeoutMs: 5_000,
-          });
-          if (result.ok) {
-            dispatched = true;
-            const pid =
-              result.output && typeof result.output === "object" && "pid" in result.output
-                ? Number((result.output as { pid?: unknown }).pid)
-                : null;
-            if (Number.isFinite(pid)) {
-              await prisma.$executeRawUnsafe(
-                `UPDATE background_shells SET pid = $2 WHERE id = $1`,
-                id,
-                pid,
-              );
-            }
-          }
-        } catch {
-          /* stay queued */
-        }
+      const dispatched = await dispatchBackgroundShell(id, deviceId, command);
+      const status = dispatched ? "running" : await shellStatus(id);
+      if (!dispatched && status === "running") {
+        await prisma.$executeRawUnsafe(`UPDATE background_shells SET status = 'queued' WHERE id = $1 AND status = 'running'`, id);
       }
-      return c.json({ id, status: dispatched ? "running" : "queued", command });
+      return c.json({ id, status: dispatched ? "running" : status === "running" ? "queued" : status, command });
     }),
   );
 
@@ -444,6 +548,25 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
       if (rows[0].status !== "running") throw new HttpError(400, "Shell is not running");
       if (!rows[0].device_id || !localRunnerGateway.deviceInfo(rows[0].device_id).online) {
         throw new HttpError(400, "Device offline");
+      }
+      const decision = await decideHostToolPermission(prisma, {
+        userId: uid,
+        deviceId: rows[0].device_id,
+        action: "send-input",
+        target: text,
+      });
+      if (decision.kind === "deny") throw new HttpError(403, "Host tool denied by permission policy.");
+      if (decision.kind === "ask") {
+        const approval = await requestApproval(prisma, {
+          userId: uid,
+          deviceId: rows[0].device_id,
+          action: "send-input",
+          target: text.slice(0, 500),
+          payload: { text },
+          source: "send-input",
+          refId: id,
+        });
+        return c.json({ ok: false, status: "pending_approval", needsPermission: true, approval: approvalView(approval) }, 202);
       }
       const result = await localRunnerGateway.invokeHostTool(rows[0].device_id, {
         id: randomUUID(),

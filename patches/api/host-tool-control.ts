@@ -17,6 +17,13 @@ import {
   type HostToolPermission,
   type StandingGrant,
 } from "./host-tool-permissions.js";
+import {
+  approvalView,
+  decideApproval,
+  isApprovalDecision,
+  listPendingApprovals,
+  sweepExpiredApprovals,
+} from "./host-tool-approvals.js";
 
 type SessionAuth = {
   api: {
@@ -28,11 +35,13 @@ export type HostToolControlDeps = {
   prisma: PrismaClient;
   auth: SessionAuth;
   sessionHeaders: (request: Request) => Headers;
+  /** 0 disables the background expiry sweep (tests). */
+  sweepIntervalMs?: number;
 };
 
 class HttpError extends Error {
   constructor(
-    readonly status: 400 | 401 | 404,
+    readonly status: 400 | 401 | 404 | 409 | 410,
     message: string,
   ) {
     super(message);
@@ -53,6 +62,14 @@ async function readJson(c: Context): Promise<Record<string, unknown>> {
 
 export function mountHostToolControl(app: Hono, deps: HostToolControlDeps): void {
   const { prisma } = deps;
+
+  // Expire unanswered approvals (fails paused background shells cleanly) even if nobody polls.
+  if (deps.sweepIntervalMs !== 0) {
+    const timer = setInterval(() => {
+      void sweepExpiredApprovals(prisma).catch(() => undefined);
+    }, deps.sweepIntervalMs ?? 30_000);
+    timer.unref?.();
+  }
 
   function route(handler: (c: Context) => Promise<Response>) {
     return async (c: Context) => {
@@ -150,11 +167,18 @@ export function mountHostToolControl(app: Hono, deps: HostToolControlDeps): void
       const action = typeof body.action === "string" ? body.action : "";
       if (!isHostToolAction(action)) throw new HttpError(400, "Unknown action");
       const grant = body.grant;
-      if (grant !== "always" && grant !== "never" && grant !== "allow-once") {
-        throw new HttpError(400, "grant must be always, never, or allow-once");
+      if (grant === "allow-once" || grant === "always") {
+        // Allowing is only possible on a pending approval the server issued for one specific
+        // action (approval card); this endpoint can only tighten.
+        throw new HttpError(
+          400,
+          `${grant} is decided on a pending approval: POST /api/host-tools/approvals/:id/decision`,
+        );
       }
+      if (grant !== "never") throw new HttpError(400, "grant must be never");
       const deviceId =
         typeof body.deviceId === "string" && body.deviceId.trim() ? body.deviceId.slice(0, 64) : null;
+      if (!deviceId) throw new HttpError(400, "deviceId required");
       const target = typeof body.target === "string" ? body.target.slice(0, 2000) : undefined;
       await recordStandingGrant(prisma, {
         id: randomUUID(),
@@ -165,6 +189,37 @@ export function mountHostToolControl(app: Hono, deps: HostToolControlDeps): void
         target,
       });
       return c.json({ ok: true });
+    }),
+  );
+
+  // ---- Per-action approvals (approval card: allow once / always / deny) ----
+  app.get(
+    "/api/host-tools/approvals",
+    route(async (c) => {
+      const uid = await userId(c);
+      const rows = await listPendingApprovals(prisma, uid);
+      return c.json({ approvals: rows.map(approvalView) });
+    }),
+  );
+
+  app.post(
+    "/api/host-tools/approvals/:id/decision",
+    route(async (c) => {
+      const uid = await userId(c);
+      const id = (c.req.param("id") ?? "").slice(0, 64);
+      const body = await readJson(c);
+      const decision = body.decision;
+      if (!isApprovalDecision(decision)) {
+        throw new HttpError(400, "decision must be allow-once, always, deny or never");
+      }
+      const result = await decideApproval(prisma, { id, userId: uid, decision });
+      if (!result.ok) {
+        return c.json(
+          { error: result.error, approval: result.approval ? approvalView(result.approval) : undefined },
+          result.status,
+        );
+      }
+      return c.json({ ok: true, approval: approvalView(result.approval), resumed: result.resumed ?? null });
     }),
   );
 }

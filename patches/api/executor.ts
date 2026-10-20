@@ -2147,7 +2147,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               const hostTry = await tryOwnerHostTool({
                 prisma: deps.prisma,
                 hostTools: deps.hostTools,
-                ownerUserId: (bot as { userId?: string }).userId ?? run.userId,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
                 botId: bot.id,
                 toolName: name,
                 args: { path: requestedPath },
@@ -2175,7 +2175,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               const hostTry = await tryOwnerHostTool({
                 prisma: deps.prisma,
                 hostTools: deps.hostTools,
-                ownerUserId: (bot as { userId?: string }).userId ?? run.userId,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
                 botId: bot.id,
                 toolName: name,
                 args: { path: filePath },
@@ -2235,7 +2235,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               const hostTry = await tryOwnerHostTool({
                 prisma: deps.prisma,
                 hostTools: deps.hostTools,
-                ownerUserId: (bot as { userId?: string }).userId ?? run.userId,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
                 botId: bot.id,
                 toolName: name,
                 args: { path: filePath, content },
@@ -2401,7 +2401,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               const hostTry = await tryOwnerHostTool({
                 prisma: deps.prisma,
                 hostTools: deps.hostTools,
-                ownerUserId: (bot as { userId?: string }).userId ?? run.userId,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
                 botId: bot.id,
                 toolName: "shell",
                 args: { command, cwd: args.cwd ? String(args.cwd) : "." },

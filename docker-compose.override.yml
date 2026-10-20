@@ -52,11 +52,13 @@ services:
       - ./patches/api/pi-local-provider.ts:/app/packages/adapters/src/pi-local-provider.ts:ro,z
       - ./patches/api/pi-models.ts:/app/packages/adapters/src/pi-models.ts:ro,z
       - ./patches/api/host-tool-bridge.ts:/app/apps/api/src/host-tool-bridge.ts:ro,z
+      - ./patches/api/host-tool-approvals.ts:/app/apps/api/src/host-tool-approvals.ts:ro,z
       - ./patches/api/host-tool-control.ts:/app/apps/api/src/host-tool-control.ts:ro,z
       - ./patches/api/host-tool-permissions.ts:/app/apps/api/src/host-tool-permissions.ts:ro,z
       - ./patches/api/host-tool-try.ts:/app/apps/api/src/host-tool-try.ts:ro,z
       - ./patches/api/parity-routes.ts:/app/apps/api/src/parity-routes.ts:ro,z
       - ./patches/api/host-tool-bridge.ts:/app/packages/adapters/src/host-tool-bridge.ts:ro,z
+      - ./patches/api/host-tool-approvals.ts:/app/packages/adapters/src/host-tool-approvals.ts:ro,z
       - ./patches/api/host-tool-permissions.ts:/app/packages/adapters/src/host-tool-permissions.ts:ro,z
       - ./patches/api/host-tool-try.ts:/app/packages/adapters/src/host-tool-try.ts:ro,z
   worker:
@@ -77,6 +79,7 @@ services:
       - ./patches/api/pi-local-provider.ts:/app/packages/adapters/src/pi-local-provider.ts:ro,z
       - ./patches/api/pi-models.ts:/app/packages/adapters/src/pi-models.ts:ro,z
       - ./patches/api/host-tool-bridge.ts:/app/packages/adapters/src/host-tool-bridge.ts:ro,z
+      - ./patches/api/host-tool-approvals.ts:/app/packages/adapters/src/host-tool-approvals.ts:ro,z
       - ./patches/api/host-tool-permissions.ts:/app/packages/adapters/src/host-tool-permissions.ts:ro,z
       - ./patches/api/host-tool-try.ts:/app/packages/adapters/src/host-tool-try.ts:ro,z
   web:

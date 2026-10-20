@@ -28,29 +28,43 @@ export async function tryOwnerHostTool(input: {
   const action = mapShellToolToHostAction(input.toolName);
   if (!action) return { kind: "fallback" };
 
-  const host = await resolveBotHostDevice(input.prisma, input.ownerUserId, input.botId);
+  // Always the bot owner's policy and computer: resolved from the bot row, never from the run actor
+  // (a peer's shared-local run must not decide host tools on the owner's machine).
+  const owners = await input.prisma.$queryRawUnsafe<Array<{ user_id: string; published: boolean | null }>>(
+    `SELECT b."userId" AS user_id, (to_jsonb(b)->>'published')::boolean AS published FROM bots b WHERE b.id = $1`,
+    input.botId,
+  );
+  const ownerUserId = owners[0]?.user_id;
+  if (!ownerUserId) return { kind: "fallback" };
+  if (input.ownerUserId && input.ownerUserId !== ownerUserId) return { kind: "fallback" };
+  // Published (marketplace) bots can be triggered by other people: they never reach the owner's
+  // computer and use the normal sandbox instead.
+  if (owners[0]?.published === true) return { kind: "fallback" };
+  const host = await resolveBotHostDevice(input.prisma, ownerUserId, input.botId);
   if (!host || !input.hostTools.deviceSupportsHostTools(host.deviceId)) {
     return { kind: "fallback" };
   }
 
   const mappedArgs = mapArgs(action, input.args);
   const hostResult = await invokeHostToolWithPermissions(input.prisma, input.hostTools, {
-    userId: input.ownerUserId,
+    userId: ownerUserId,
     deviceId: host.deviceId,
     action,
     args: mappedArgs,
   });
 
+  if (!hostResult.ok && hostResult.refused) {
+    // Denied by policy, by the owner, expired, or refused by the sandbox/guards on the computer.
+    // Never fall back to another executor for an action the owner refused.
+    return {
+      kind: "result",
+      value: { error: hostResult.error, refused: true, action, approvalId: hostResult.approvalId ?? null },
+    };
+  }
   if (!hostResult.ok && hostResult.needsPermission) {
     return {
       kind: "needs_permission",
-      value: {
-        error: hostResult.error,
-        needsPermission: true,
-        action,
-        deviceId: host.deviceId,
-        approveHint: "POST /api/host-tools/grants with grant=always|allow-once|never",
-      },
+      value: { error: hostResult.error, needsPermission: true, action, deviceId: host.deviceId },
     };
   }
   if (!hostResult.ok) return { kind: "fallback" };
