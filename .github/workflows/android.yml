@@ -1,0 +1,57 @@
+name: Android (TWA debug APK)
+
+# Separate from ci.yml so web/api PRs don't pay for an Android build.
+on:
+  pull_request:
+    paths:
+      - "android/**"
+      - "scripts/android-*"
+      - ".github/workflows/android.yml"
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "scripts/android-*"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Optional repo variable; the placeholder host builds but won't verify.
+      RAKIJAZIOS_TWA_HOST: ${{ vars.RAKIJAZIOS_TWA_HOST || 'rakijazios.example.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+      - name: Assemble debug APK
+        run: scripts/android-twa-build.sh
+      - name: assetlinks.json for this build's (throwaway) debug key
+        run: |
+          FP=$("$ANDROID_HOME"/build-tools/36.0.0/apksigner verify --print-certs android/twa/app/build/outputs/apk/debug/app-debug.apk | sed -n 's/.*SHA-256 digest: //p' | head -1)
+          node scripts/android-assetlinks.mjs "$FP" | tee android/twa/app/build/outputs/apk/debug/assetlinks.debug.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rakijazios-twa-debug-apk
+          path: |
+            android/twa/app/build/outputs/apk/debug/app-debug.apk
+            android/twa/app/build/outputs/apk/debug/assetlinks.debug.json
+          retention-days: 14

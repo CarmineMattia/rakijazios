@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Same colours as patches/web/dist/site.webmanifest. -->
+<resources>
+    <color name="rk_theme">#0D0D0E</color>
+    <color name="rk_background">#050506</color>
+</resources>
