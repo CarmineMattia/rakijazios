@@ -1,7 +1,7 @@
 // Runner health e2e: a throwaway 0.2.3 runner for the QA account reports health; the owner
 // can "Check now" (API + UI); another account gets 404; a stopped runner reads as not reachable.
 // Only the computer and pairing this script creates are removed. Never prints codes or tokens.
-import { launch, login, api, sql, sleep, shot, waitFor, BASE, OUT, QA_EMAIL, QA2_EMAIL, q } from '../m2a/lib.mjs';
+import { launch, login, api, sql, sleep, shot, waitFor, BASE, OUT, QA_EMAIL, QA2_EMAIL, q, container } from '../m2a/lib.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 const T = '/tmp/rk-health-e2e';
@@ -99,7 +99,7 @@ try {
   const left = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));
   ok('otherDevicesUntouched', { before: devicesBefore.size }, [...devicesBefore].every((id) => left.has(id)) && (!created.devId || !left.has(created.devId)));
   await browser.close(); if (b2) await b2.close();
-  const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, `rakazo-${s}-1`], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n')
+  const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, container(s)], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n')
     + (fs.existsSync(T + '/cfg/runner.log') ? fs.readFileSync(T + '/cfg/runner.log', 'utf8') : '');
   const leaks = secrets.filter(Boolean).reduce((n, s) => n + logs.split(s).length - 1, 0);
   ok('secretsInLogs', leaks, leaks === 0);

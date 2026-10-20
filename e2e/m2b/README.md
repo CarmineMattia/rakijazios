@@ -56,3 +56,14 @@ Pairs a throwaway runner for qa, binds QA Tester Bot to it, and asks in the priv
 - 0 secrets in the logs.
 
 It removes its own computer, binding, grants and usage rows.
+
+## Running on an isolated stack (unmerged branches)
+
+`e2e/iso-full-stack.sh up` starts a throwaway full stack (project `rkfull-*`, own volumes, fresh
+database, throwaway secrets, 127.0.0.1-only ports) and seeds the QA fixtures these scripts need.
+Then `. <dir>/iso-env.sh` points every script at it (`RK_BASE`, `RK_PG_CONTAINER`, `RK_API_CONTAINER`,
+`RK_STACK_PREFIX` for log checks, its own `RK_E2E_LOCK`/`RK_E2E_OUT`, and `RK_LIVE_DIST` = that
+stack's web dist for 81). Leave ~20 s between scripts: the auth rate limiter shares one bucket for
+all local requests, and back-to-back magic-link logins can get 429. `e2e/iso-full-stack.sh down <dir>`
+removes everything.
+

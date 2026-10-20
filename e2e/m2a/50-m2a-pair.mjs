@@ -1,7 +1,7 @@
 // M2a e2e: "My hardware" pairing flow with a throwaway runner (temp HOME, config dir and service
 // name), as the QA account. Never prints codes or tokens; only counts of their occurrences in logs.
 // Never touches the default ~/.config/rakazo-runner or the default service name.
-import { launch, login, api, sql, shot, sleep, BASE, OUT, API_DIRECT, API_CONTAINER, QA_EMAIL, QA2_EMAIL } from './lib.mjs';
+import { launch, login, api, sql, shot, sleep, BASE, OUT, API_DIRECT, API_CONTAINER, QA_EMAIL, QA2_EMAIL, container } from './lib.mjs';
 import os from 'node:os';
 import { join } from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -188,7 +188,7 @@ ok('spoofedXffStillLimited', await fetch(BASE + '/api/local-runners/pair', { met
 const logs = {};
 logs.api = execFileSync('docker', ['logs', '--since', startedAt, API_CONTAINER], { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'] }).toString() + '';
 try { logs.apiErr = spawnSync('docker', ['logs', '--since', startedAt, API_CONTAINER], { encoding: 'utf8', maxBuffer: 1 << 28 }).stderr; } catch {}
-logs.web = spawnSync('docker', ['logs', '--since', startedAt, 'rakazo-web-1'], { encoding: 'utf8', maxBuffer: 1 << 28 }); logs.web = logs.web.stdout + logs.web.stderr;
+logs.web = spawnSync('docker', ['logs', '--since', startedAt, container('web')], { encoding: 'utf8', maxBuffer: 1 << 28 }); logs.web = logs.web.stdout + logs.web.stderr;
 logs.journal = spawnSync('journalctl', ['--user', '-u', SVC, '--since', '-30min', '--no-pager'], { encoding: 'utf8' }).stdout;
 for (const f of fs.readdirSync(T)) if (f.endsWith('.log')) logs[f] = fs.readFileSync(`${T}/${f}`, 'utf8');
 if (fs.existsSync(T + '/cfg')) for (const f of fs.readdirSync(T + '/cfg')) if (f.endsWith('.log')) logs['cfg/' + f] = fs.readFileSync(`${T}/cfg/${f}`, 'utf8');

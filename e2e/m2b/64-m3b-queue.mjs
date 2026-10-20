@@ -4,7 +4,7 @@
 // service name) for the QA account; the default ~/.config/rakazo-runner is never touched.
 // Never prints codes or tokens; only counts of their occurrences in logs (expect 0).
 //   RK_M2B_MODEL  model to switch on (default: smallest advertised, qwen2.5:3b if present)
-import { launch, login, api, sql, shot, sleep, waitFor, BASE, OUT, API_CONTAINER, QA_EMAIL, QA2_EMAIL, q } from '../m2a/lib.mjs';
+import { launch, login, api, sql, shot, sleep, waitFor, BASE, OUT, API_CONTAINER, QA_EMAIL, QA2_EMAIL, q, container } from '../m2a/lib.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 const T = '/tmp/rk-m3b-e2e';
@@ -123,7 +123,7 @@ try {
   const left = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));
   ok('otherDevicesUntouched', { before: devicesBefore.size, oursGone: !created.devId || !left.has(created.devId) }, [...devicesBefore].every((id) => left.has(id)) && (!created.devId || !left.has(created.devId)));
   await browser.close();
-  const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, `rakazo-${s}-1`], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n')
+  const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, container(s)], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n')
     + (fs.existsSync(T + '/cfg/runner.log') ? fs.readFileSync(T + '/cfg/runner.log', 'utf8') : '');
   const leaks = secrets.filter(Boolean).reduce((n, s) => n + logs.split(s).length - 1, 0) + (logs.match(/sl2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.\d+\.[A-Za-z0-9_-]{20,}/g) || []).length;
   eq('secretsInLogs', leaks, 0);

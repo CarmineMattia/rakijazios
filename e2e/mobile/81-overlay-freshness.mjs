@@ -9,6 +9,9 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { launch, login, sleep, BASE, QA_EMAIL } from '../m2a/lib.mjs';
 
+// Against any other stack (RK_BASE set, e.g. an isolated rkfull-* stack) the dist must be named
+// explicitly, so this never writes the live dist while testing something else.
+if (process.env.RK_BASE && !process.env.RK_LIVE_DIST) throw new Error('RK_BASE is set: also set RK_LIVE_DIST to that stack\'s patches/web/dist');
 const DIST = process.env.RK_LIVE_DIST || join(homedir(), 'projects/rakazo/patches/web/dist');
 const STAMP = new URL('../../scripts/stamp-overlays.mjs', import.meta.url).pathname;
 const file = join(DIST, 'pwa-overlay.js'); const index = join(DIST, 'index.html');
@@ -54,7 +57,9 @@ try {
   ok('offlineShellRunsOverlays', off, off);
   await page.setOfflineMode(false);
 } finally {
-  writeFileSync(file, orig.file); writeFileSync(index, orig.index);
+  // Restore only what changed (an early failure leaves the files, and their mtimes, untouched).
+  if (!readFileSync(file).equals(orig.file)) writeFileSync(file, orig.file);
+  if (!readFileSync(index).equals(orig.index)) writeFileSync(index, orig.index);
   await browser.close();
 }
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED');
