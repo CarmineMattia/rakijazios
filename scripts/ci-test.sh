@@ -14,11 +14,15 @@ fail=0
 echo "== runner tests"
 (cd runner && node --experimental-strip-types --test src/*.test.ts) || fail=1
 
-# Mounts: every ./patches/... → /app/... bind in the override (web dist, vite config and supervisor are not typechecked here).
+echo "== desktop smoke"
+node --test packages/desktop/smoke.test.cjs || fail=1
+
+# Mounts: every ./patches/... and ./runner → /app/... bind in the override (web dist, vite config and supervisor are not
+# typechecked here). ./runner is the installer bundle (/app/apps/api/local-runner-bundle), so the bundle tests never skip.
 mounts=()
 while IFS=: read -r src dst; do
   [ -e "${src#./}" ] && mounts+=(-v "$ROOT/${src#./}:$dst:ro,z")
-done < <(grep -o '\./patches/[^:]*:/app[^:]*' docker-compose.override.yml | grep -v 'web/dist\|vite.config\|supervisor' | sort -u -t: -k2,2)
+done < <(grep -o '\./\(patches\|runner\)[^:]*:/app[^:]*' docker-compose.override.yml | grep -v 'web/dist\|vite.config\|supervisor' | sort -u -t: -k2,2)
 
 tests=()
 for f in patches/api/*.test.ts; do
@@ -36,7 +40,7 @@ canary="$(mktemp -d)/zz-canary.ts"; echo 'const rkCanary: number = "canary"; exp
 mounts+=(-v "$canary:/app/apps/api/src/zz-canary.ts:ro,z")
 
 echo "== typecheck + unit tests ($IMAGE, ${#tests[@]} test files)"
-docker run --rm -u 0 --network none -e TESTS="${tests[*]}" "${mounts[@]}" "$IMAGE" sh -c '
+docker run --rm -u 0 --network none -e RAKAZO_TEST_REQUIRE_BUNDLE=1 -e TESTS="${tests[*]}" "${mounts[@]}" "$IMAGE" sh -c '
   rc=0
   cd /app/apps/api
   out=$(/app/node_modules/.bin/tsc --noEmit -p tsconfig.json 2>&1 || true)

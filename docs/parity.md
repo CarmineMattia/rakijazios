@@ -84,12 +84,22 @@ On the computer:
 ```bash
 scripts/ci-test.sh     # runner tests, tsc, vitest, overlay DOM tests (RAKAZO_TEST_REQUIRE_SANDBOX=1 in CI)
 scripts/ci-boot.sh     # api boot + migrations + patch DDL + *.postgres.test.ts on a throwaway PostgreSQL
+scripts/ci-install.sh  # install the runner from the bundle the api serves (real install.sh), start it, wait for it to connect
 
 # end to end on an isolated stack (never the live one)
 eval "$(e2e/parity/isolated-stack.sh up)"
 ISO_BASE=http://127.0.0.1:$PORT ISO_PG=$PG node e2e/parity/90-host-tools-approvals.mjs
 e2e/parity/isolated-stack.sh down "$PROJECT"
 ```
+
+### Runner installer bundle
+
+The api serves the runner to installers from a fixed list, `RUNNER_FILES` in
+`patches/api/local-runner-install.ts`. **A new file under `runner/src/` must be added there**, or every
+install fails with `ERR_MODULE_NOT_FOUND` (this happened with `host-tools.ts` after PR #22). Three
+checks guard it: `tests/runner-bundle.test.mjs` (list == `runner/src/*.ts`, imports, no npm deps,
+desktop launcher paths), the vitest bundle tests (now run against the mounted `./runner`, never
+skipped in CI) and `scripts/ci-install.sh` (a real install from the served bundle).
 
 ## Key endpoints
 

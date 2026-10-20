@@ -25,7 +25,7 @@ trap cleanup EXIT
 mounts=()
 while IFS=: read -r src dst; do
   [ -e "${src#./}" ] && mounts+=(-v "$ROOT/${src#./}:$dst:ro,z")
-done < <(grep -o '\./patches/[^:]*:/app[^:]*' docker-compose.override.yml | grep -v 'web/dist\|vite.config\|supervisor' | sort -u -t: -k2,2)
+done < <(grep -o '\./\(patches\|runner\)[^:]*:/app[^:]*' docker-compose.override.yml | grep -v 'web/dist\|vite.config\|supervisor' | sort -u -t: -k2,2)
 
 docker network create --internal "$NET" >/dev/null
 docker run -d --name "$P-pg" --network "$NET" --tmpfs /var/lib/postgresql/data \

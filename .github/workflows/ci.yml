@@ -42,3 +42,5 @@ jobs:
         run: scripts/ci-test.sh
       - name: Boot smoke (api + migrations + patch DDL on a throwaway PostgreSQL)
         run: scripts/ci-boot.sh
+      - name: Install smoke (install the runner from the served bundle with install.sh, start it, wait for it to connect)
+        run: scripts/ci-install.sh
