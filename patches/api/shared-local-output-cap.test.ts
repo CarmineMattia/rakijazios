@@ -18,12 +18,12 @@ describe("shared-local output cap", () => {
     expect(outputTokenCap("999999")).toBe(32_768);
   });
 
-  it("always sends a max token limit, never above the cap", () => {
+  it("always sends the owner's cap, not the client's context-derived value", () => {
     expect(capRequestBody({ messages: [] }, 4096)).toMatchObject({ max_tokens: 4096, max_completion_tokens: 4096 });
     expect(capRequestBody({ max_completion_tokens: 100000 }, 4096)).toMatchObject({ max_tokens: 4096, max_completion_tokens: 4096 });
-    expect(capRequestBody({ max_tokens: 300 }, 4096)).toMatchObject({ max_tokens: 300, max_completion_tokens: 300 });
-    expect(capRequestBody({ max_tokens: 900, max_completion_tokens: 500 }, 4096)).toMatchObject({ max_tokens: 500 });
-    expect(capRequestBody({ max_tokens: "lots", max_completion_tokens: 0 }, 2048)).toMatchObject({ max_tokens: 2048 });
+    // pi-ai asks for 1 token when its prompt estimate fills the window; that must not reach Ollama as max_tokens.
+    expect(capRequestBody({ max_completion_tokens: 1 }, 4096)).toMatchObject({ max_tokens: 4096, max_completion_tokens: 4096 });
+    expect(capRequestBody({ max_tokens: 300 }, 2048)).toMatchObject({ max_tokens: 2048, max_completion_tokens: 2048 });
     const body = { model: "m", messages: [{ role: "user", content: "hi" }], temperature: 0.2 };
     expect(capRequestBody(body, 1024)).toMatchObject(body);
   });

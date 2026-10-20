@@ -86,6 +86,11 @@ try {
   const outs = rows.map((l) => Number(l.split('|')[1]));
   ok('usageRowsOk', rows, rows.length > 0 && rows.every((l) => l.startsWith('ok|')));
   ok('outputAtOrUnderCap', { outs, cap: CAP, margin: MARGIN }, outs.length > 0 && outs.every((n) => n > 0 && n <= CAP + MARGIN));
+  // A cap must not shrink normal answers: pi-ai asks for 1 token when the thread is long, and a
+  // gateway that forwarded that as max_tokens made the bot answer "#" (seen on the first try).
+  ok('answerNotCutShort', outs, outs.some((n) => n >= 256));
+  const answer = sql(`select coalesce(sum(length(b->>'text')), 0) from messages m, jsonb_array_elements(m.blocks) b where m."runId"='${q(run.id || '')}' and m.role='bot'`);
+  ok('answerTextLong', Number(answer), Number(answer) > 1000);
   ok('boundedTime', secs, secs < 15 * 60);
   const after = await sendPrivate('Reply with just the word OK.');
   const r2 = after.since ? await finished(after.since) : after;

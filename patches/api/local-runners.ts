@@ -280,12 +280,15 @@ export function outputTokenCap(raw: string | undefined): number {
   return Math.min(32_768, Math.max(256, n));
 }
 
-/** Clamp the request's max tokens to the cap (both OpenAI field names; servers read one). */
+/**
+ * Send the owner's cap as the answer's token limit (both OpenAI field names; servers read one).
+ * The client's own value is not passed through: pi-ai derives it from contextWindow - prompt
+ * estimate - 4096 (minimum 1), so a long thread asks for 1 token. Ollama ignores
+ * max_completion_tokens (which is why answers were unbounded), but honors max_tokens, so
+ * forwarding it would cut answers to a single token. The model server trims the prompt itself.
+ */
 export function capRequestBody(body: Record<string, unknown>, cap: number): Record<string, unknown> {
-  const asked = [body.max_tokens, body.max_completion_tokens]
-    .map((v) => (typeof v === "number" ? v : Number.NaN))
-    .filter((v) => Number.isFinite(v) && v > 0);
-  const limit = Math.floor(Math.min(cap, ...asked));
+  const limit = Math.max(1, Math.floor(cap));
   return { ...body, max_tokens: limit, max_completion_tokens: limit };
 }
 
