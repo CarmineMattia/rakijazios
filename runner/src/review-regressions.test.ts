@@ -1,4 +1,5 @@
 // Regression tests for the PR #22 security review (C1-C3, H1-H3, M3).
+import { spawnSync } from "node:child_process";
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -153,6 +154,30 @@ describe("security review regressions", () => {
       assert.doesNotMatch(String(res.output.stdout), /_OK/);
       assert.match(String(res.output.stdout), /TCP_FAIL/);
     }
+  });
+
+  it("kill-shell right after start leaves no sandbox behind (no orphaned bwrap holding the pipes)", { skip }, async () => {
+    // Regression: SIGTERM to the outer bwrap during setup orphaned the half-built sandbox forever
+    // (about 1 in 4 runs), which hung this test file in CI until the job timed out.
+    // Kill at 0-15 ms after start, many at once: the race is a kill landing while bwrap is still
+    // setting up, which concurrent sandbox startups make likely.
+    const roots: string[] = [];
+    await Promise.all(
+      Array.from({ length: 24 }, async (_, i) => {
+        const root = await tmp("rk-kill-");
+        roots.push(root);
+        const started = await exec({ action: "run-command", args: { command: "sleep 30", background: true, shellId: `kill-${i}` }, hostRoot: root });
+        assert.equal(started.ok, true);
+        await new Promise((r) => setTimeout(r, i % 16));
+        const killed = await exec({ action: "kill-shell", args: { shellId: `kill-${i}` }, hostRoot: root });
+        assert.equal(killed.ok, true);
+      }),
+    );
+    const alive = () => roots.filter((r) => spawnSync("pgrep", ["-f", r], { encoding: "utf8" }).stdout.trim() !== "");
+    for (let i = 0; i < 40 && alive().length; i++) await new Promise((r) => setTimeout(r, 100));
+    const left = alive();
+    for (const r of left) spawnSync("pkill", ["-KILL", "-f", r]); // don't leave them behind if this fails
+    assert.deepEqual(left, [], "sandboxes still running after kill-shell");
   });
 
   it("M3: a second background shell can't reuse (and orphan) a running shell id", { skip }, async () => {

@@ -200,7 +200,62 @@ type BgShell = {
   stdout: string;
   stderr: string;
   startedAt: number;
+  sandboxPid: Promise<number | null>;
 };
+
+// Every sandbox is spawned with bwrap --info-fd 3: once the sandbox is set up, bwrap reports the
+// host pid of its init (pid 1 of the sandbox's pid namespace). Killing that pid kills everything in
+// the sandbox. Signalling only the outer bwrap is not enough: if it dies during setup (a kill right
+// after spawn), --die-with-parent is not armed yet and the half-built sandbox is orphaned for good,
+// holding the output pipes open (a killed shell that never dies, and a runner that can't exit).
+const SANDBOX_INFO_FD = 3;
+const SANDBOX_READY_WAIT_MS = 5_000;
+
+function spawnSandbox(bwrap: string, args: string[], cwd: string, stdin: "pipe" | "ignore") {
+  const child = spawn(bwrap, args, { cwd, env: {}, stdio: [stdin, "pipe", "pipe", "pipe"], detached: false });
+  const info = child.stdio[SANDBOX_INFO_FD] as NodeJS.ReadableStream | null;
+  const sandboxPid = new Promise<number | null>((resolve) => {
+    let buf = "";
+    const done = () => {
+      const pid = Number(/"child-pid"\s*:\s*(\d+)/.exec(buf)?.[1]);
+      resolve(Number.isInteger(pid) && pid > 1 ? pid : null);
+    };
+    if (!info) return resolve(null);
+    info.on("data", (d: Buffer) => {
+      buf += d.toString("utf8");
+      if (/"child-pid"\s*:\s*\d+/.test(buf)) done();
+    });
+    info.on("end", done);
+    info.on("error", () => resolve(null));
+    child.on("exit", done);
+  });
+  return { child, sandboxPid };
+}
+
+/** Kill a sandbox and everything in it; never leaves an orphan behind. Bounded (~5 s). */
+async function killSandbox(child: ReturnType<typeof spawn>, sandboxPid: Promise<number | null>): Promise<void> {
+  const exited = () => child.exitCode !== null || child.signalCode !== null;
+  // Wait until bwrap has finished setting up (or exited) before signalling anything.
+  const pid = await Promise.race([sandboxPid, new Promise<null>((r) => setTimeout(() => r(null), SANDBOX_READY_WAIT_MS).unref?.())]);
+  if (pid) {
+    try {
+      process.kill(pid, "SIGKILL"); // init of the sandbox's pid namespace: the kernel kills the rest
+    } catch {
+      /* already gone */
+    }
+  }
+  if (!exited()) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  // Never let a stuck descendant keep our end of the pipes (and the runner) alive.
+  setTimeout(() => {
+    for (const s of child.stdio) (s as { destroy?: () => void } | null)?.destroy?.();
+  }, 1_000).unref?.();
+}
 
 const backgroundShells = new Map<string, BgShell>();
 
@@ -225,20 +280,15 @@ async function runCommand(
   if (!sandbox.ok) {
     return { ok: false, denied: true, error: `Shell is refused: ${sandbox.reason}.` };
   }
-  const spawnArgs = sandboxArgs({ root, cwd, egressAllowed, command });
+  const spawnArgs = sandboxArgs({ root, cwd, egressAllowed, command, infoFd: SANDBOX_INFO_FD });
   if (opts?.background) {
     const id = opts.shellId || `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (backgroundShells.has(id)) {
       // never overwrite (and orphan) a running shell
       return { ok: false, denied: true, error: `Background shell id ${id} is already in use.` };
     }
-    const child = spawn(sandbox.bwrap, spawnArgs, {
-      cwd,
-      env: {},
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: false,
-    });
-    const entry: BgShell = { id, child, stdout: "", stderr: "", startedAt: Date.now() };
+    const { child, sandboxPid } = spawnSandbox(sandbox.bwrap, spawnArgs, cwd, "pipe");
+    const entry: BgShell = { id, child, stdout: "", stderr: "", startedAt: Date.now(), sandboxPid };
     const max = 512 * 1024;
     child.stdout?.on("data", (buf: Buffer) => {
       if (entry.stdout.length < max) entry.stdout += buf.toString("utf8").slice(0, max - entry.stdout.length);
@@ -257,11 +307,7 @@ async function runCommand(
     };
   }
   return await new Promise((resolvePromise) => {
-    const child = spawn(sandbox.bwrap, spawnArgs, {
-      cwd,
-      env: {},
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const { child, sandboxPid } = spawnSandbox(sandbox.bwrap, spawnArgs, cwd, "ignore");
     let stdout = "";
     let stderr = "";
     const max = 512 * 1024;
@@ -272,11 +318,7 @@ async function runCommand(
       if (stderr.length < max) stderr += buf.toString("utf8").slice(0, max - stderr.length);
     });
     const timer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
+      void killSandbox(child, sandboxPid);
       resolvePromise({ ok: false, error: `Timed out after ${timeoutMs}ms` });
     }, timeoutMs);
     child.on("error", (err) => {
@@ -463,18 +505,8 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
         const shellId = String(args.shellId ?? args.id ?? "");
         const shell = backgroundShells.get(shellId);
         if (shell) {
-          try {
-            shell.child.kill("SIGTERM");
-          } catch {
-            /* ignore */
-          }
-          setTimeout(() => {
-            try {
-              if (!shell.child.killed) shell.child.kill("SIGKILL");
-            } catch {
-              /* ignore */
-            }
-          }, 2_000).unref?.();
+          // Kills the whole sandbox (its pid-namespace init), also right after start; see killSandbox.
+          await killSandbox(shell.child, shell.sandboxPid);
           backgroundShells.delete(shellId);
           return {
             ok: true,

@@ -12,7 +12,8 @@ IMAGE="${RAKAZO_APP_IMAGE:-ghcr.io/elie222/rakazo/app@sha256:1a70f06cf3c7a3f5c7f
 fail=0
 
 echo "== runner tests"
-(cd runner && node --experimental-strip-types --test src/*.test.ts) || fail=1
+# --test-timeout: a hung test fails fast with its name instead of hanging the job until CI cancels it.
+(cd runner && node --experimental-strip-types --test --test-timeout=120000 src/*.test.ts) || fail=1
 
 echo "== desktop smoke"
 node --test packages/desktop/smoke.test.cjs || fail=1
