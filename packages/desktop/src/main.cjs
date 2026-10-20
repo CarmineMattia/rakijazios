@@ -74,14 +74,35 @@ function createTray() {
   tray.on("click", () => mainWindow?.show());
 }
 
-function runnerBin() {
-  const home = process.env.HOME || process.env.USERPROFILE || "";
-  const candidates = [
-    process.env.RAKAZO_RUNNER_BIN,
-    path.join(home, ".local/bin/rakazo-runner"),
-    path.join(home, ".local/share/rakijazios-runner/rakazo-runner"),
+// Where the installers put the launcher (keep in sync with patches/api/local-runner-install.ts;
+// tests/runner-bundle.test.mjs checks it):
+//   install.sh:  $RAKAZO_RUNNER_HOME or ~/.local/share/rakijazios-runner/rakazo-runner, linked from ~/.local/bin
+//   install.ps1: $RAKAZO_RUNNER_HOME or %LOCALAPPDATA%\Rakijazios\runner\rakazo-runner.cmd
+function runnerCandidates(env = process.env, platform = process.platform) {
+  const home = env.HOME || env.USERPROFILE || "";
+  if (platform === "win32") {
+    const prefix = env.RAKAZO_RUNNER_HOME || (env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "Rakijazios", "runner") : "");
+    return [env.RAKAZO_RUNNER_BIN, prefix && path.join(prefix, "rakazo-runner.cmd")].filter(Boolean);
+  }
+  return [
+    env.RAKAZO_RUNNER_BIN,
+    env.RAKAZO_RUNNER_HOME && path.join(env.RAKAZO_RUNNER_HOME, "rakazo-runner"),
+    home && path.join(home, ".local/bin/rakazo-runner"),
+    home && path.join(home, ".local/share/rakijazios-runner/rakazo-runner"),
   ].filter(Boolean);
-  return candidates.find((p) => p && fs.existsSync(p)) || null;
+}
+
+function runnerBin() {
+  return runnerCandidates().find((p) => fs.existsSync(p)) || null;
+}
+
+// Node refuses to spawn .cmd/.bat directly (EINVAL since the 2024 batch-file fix). Run it through
+// cmd.exe with the path quoted; the only argument is the fixed word "run".
+function runnerSpawnArgs(bin, platform = process.platform) {
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    return { file: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", `"${bin}" run`], windowsVerbatimArguments: true };
+  }
+  return { file: bin, args: ["run"], windowsVerbatimArguments: false };
 }
 
 function isWebUrl(url) {
@@ -100,9 +121,12 @@ function startRunner() {
     console.error("[desktop] rakazo-runner not found; install from My hardware");
     return;
   }
-  runnerChild = spawn(bin, ["run"], {
+  const { file, args, windowsVerbatimArguments } = runnerSpawnArgs(bin);
+  runnerChild = spawn(file, args, {
     stdio: "ignore",
     detached: false,
+    windowsHide: true,
+    windowsVerbatimArguments,
     // Host tools stay opt-in: the runner inherits the user's own RAKAZO_HOST_TOOLS (default off).
     env: { ...process.env },
   });

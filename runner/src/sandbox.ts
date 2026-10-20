@@ -75,6 +75,8 @@ export function sandboxArgs(input: {
   cwd: string;
   egressAllowed: boolean;
   command: string;
+  /** bwrap writes {"child-pid": N} here once the sandbox is set up (see host-tools killSandbox). */
+  infoFd?: number;
 }): string[] {
   const args = [
     ...systemMounts(),
@@ -104,6 +106,7 @@ export function sandboxArgs(input: {
     // DNS: /etc/resolv.conf often points into /run (systemd-resolved).
     args.push("--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve");
   }
+  if (input.infoFd !== undefined) args.push("--info-fd", String(input.infoFd));
   args.push("--", "/bin/bash", "--noprofile", "--norc", "-c", input.command);
   return args;
 }

@@ -9,7 +9,7 @@
 //   d) key revoked → a new code pairs again, old file backed up
 // Never prints codes, tokens or credential contents; secret occurrences in logs are counted.
 // Never uses the default ~/.config/rakazo-runner or the default service name.
-import { launch, login, api, sql, q, shot, sleep, waitFor, openHardware, leakCounts, BASE, OUT, API_CONTAINER, QA_EMAIL, QA2_EMAIL } from './lib.mjs';
+import { launch, login, api, sql, q, shot, sleep, waitFor, openHardware, leakCounts, BASE, OUT, API_CONTAINER, QA_EMAIL, QA2_EMAIL, container } from './lib.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -193,7 +193,7 @@ try {
   // ---------- secrets ----------
   const texts = {};
   texts.api = spawnSync('docker', ['logs', '--since', startedAt, API_CONTAINER], { encoding: 'utf8', maxBuffer: 1 << 28 }); texts.api = texts.api.stdout + texts.api.stderr;
-  texts.web = spawnSync('docker', ['logs', '--since', startedAt, 'rakazo-web-1'], { encoding: 'utf8', maxBuffer: 1 << 28 }); texts.web = texts.web.stdout + texts.web.stderr;
+  texts.web = spawnSync('docker', ['logs', '--since', startedAt, container('web')], { encoding: 'utf8', maxBuffer: 1 << 28 }); texts.web = texts.web.stdout + texts.web.stderr;
   texts.journal = spawnSync('journalctl', ['--user', '-u', SVC, '--since', '-30min', '--no-pager'], { encoding: 'utf8' }).stdout;
   for (const f of fs.readdirSync(T)) if (f.endsWith('.log') && f !== 'seed.log') texts[f] = fs.readFileSync(join(T, f), 'utf8');
   for (const f of fs.readdirSync(CFG)) if (f.endsWith('.log')) texts['cfg/' + f] = fs.readFileSync(join(CFG, f), 'utf8');

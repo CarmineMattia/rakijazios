@@ -37,6 +37,13 @@ export const RUNNER_FILES: ReadonlyArray<{ name: string; path: string }> = [
   { name: "loopback.ts", path: "src/loopback.ts" },
   { name: "pair.ts", path: "src/pair.ts" },
   { name: "protocol.ts", path: "src/protocol.ts" },
+  // Host tools (P1/P5): client.ts imports host-tools.ts, which imports the rest. A runner file
+  // missing here breaks every install with ERR_MODULE_NOT_FOUND (tests/runner-bundle.test.mjs and
+  // scripts/ci-install.sh guard this list).
+  { name: "host-tools.ts", path: "src/host-tools.ts" },
+  { name: "permissions.ts", path: "src/permissions.ts" },
+  { name: "sandbox.ts", path: "src/sandbox.ts" },
+  { name: "payment-guard.ts", path: "src/payment-guard.ts" },
 ];
 
 export type RunnerBundle = {
