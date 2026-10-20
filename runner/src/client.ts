@@ -71,7 +71,7 @@ export class LocalRunnerClient {
   /** The last probe found a model server (a pinned URL can be set but not answering). */
   private serverOk = false;
   private computerUseGate = process.env.RAKAZO_COMPUTER_USE_GATE === "1";
-  private hostToolsEnabled = process.env.RAKAZO_HOST_TOOLS !== "0";
+  private hostToolsEnabled = process.env.RAKAZO_HOST_TOOLS === "1"; // host tools are opt-in (default OFF)
   private egressAllowed = process.env.RAKAZO_HOST_EGRESS === "1";
 
   constructor(opts: RunnerOptions) {

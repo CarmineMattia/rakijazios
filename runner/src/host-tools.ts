@@ -18,6 +18,9 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { constants as fsConstants } from "node:fs";
 
+import { escalationAttempt, sandboxArgs, sandboxStatus } from "./sandbox.ts";
+import { checkComputerAction, readFocusedWindow, type FocusedWindow } from "./payment-guard.ts";
+
 const execFile = promisify(execFileCb);
 
 function which(bin: string): string | null {
@@ -136,6 +139,8 @@ export type HostToolRequest = {
   egressAllowed?: boolean;
   /** Local permission decision from permissions.json mirror. */
   localDecision?: "allow" | "deny" | "ask";
+  /** Tests: focused-window reader for the payment guard (default: X11 via xdotool/xprop). */
+  readWindow?: () => FocusedWindow;
 };
 
 export type HostToolResponse =
@@ -187,27 +192,27 @@ export function getBackgroundShell(id: string): BgShell | undefined {
 
 async function runCommand(
   command: string,
+  root: string,
   cwd: string,
   timeoutMs: number,
   egressAllowed: boolean,
   opts?: { background?: boolean; shellId?: string },
 ): Promise<HostToolResponse> {
   if (!command.trim()) return { ok: false, error: "Empty command" };
-  if (!egressAllowed) {
-    // Soft guard: refuse obvious network tools unless egress is enabled.
-    if (/\b(curl|wget|nc|ncat|ssh|scp|ftp|telnet)\b/i.test(command)) {
-      return {
-        ok: false,
-        error: "Network tools are blocked while host egress is off.",
-        denied: true,
-      };
-    }
+  const escalation = escalationAttempt(command);
+  if (escalation) {
+    return { ok: false, denied: true, error: `Privilege escalation is not allowed (${escalation}).` };
   }
+  const sandbox = sandboxStatus();
+  if (!sandbox.ok) {
+    return { ok: false, denied: true, error: `Shell is refused: ${sandbox.reason}.` };
+  }
+  const spawnArgs = sandboxArgs({ root, cwd, egressAllowed, command });
   if (opts?.background) {
     const id = opts.shellId || `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const child = spawn("/bin/bash", ["-lc", command], {
+    const child = spawn(sandbox.bwrap, spawnArgs, {
       cwd,
-      env: { ...process.env, HOME: homedir(), PATH: process.env.PATH },
+      env: {},
       stdio: ["pipe", "pipe", "pipe"],
       detached: false,
     });
@@ -230,13 +235,9 @@ async function runCommand(
     };
   }
   return await new Promise((resolvePromise) => {
-    const child = spawn("/bin/bash", ["-lc", command], {
+    const child = spawn(sandbox.bwrap, spawnArgs, {
       cwd,
-      env: {
-        ...process.env,
-        HOME: homedir(),
-        PATH: process.env.PATH,
-      },
+      env: {},
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -301,7 +302,7 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
         const cwdArg = typeof args.cwd === "string" ? args.cwd : ".";
         const cwd = await ensureInsideRoot(root, cwdArg);
         await mkdir(cwd, { recursive: true });
-        return await runCommand(command, cwd, timeoutMs, egress, {
+        return await runCommand(command, await realpath(root), cwd, timeoutMs, egress, {
           background: args.background === true,
           shellId: typeof args.shellId === "string" ? args.shellId : undefined,
         });
@@ -364,6 +365,14 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
             ok: false,
             error: `Computer use drivers are Linux-first; platform=${process.platform}`,
           };
+        }
+        if (action !== "computer-wait" && action !== "computer-apps") {
+          const guard = checkComputerAction({
+            action,
+            window: (req.readWindow ?? readFocusedWindow)(),
+            typedText: action === "computer-type" ? String(args.text ?? "") : undefined,
+          });
+          if (!guard.ok) return { ok: false, denied: true, error: guard.reason };
         }
         if (action === "computer-screenshot") return await linuxScreenshot();
         if (action === "computer-wait") {

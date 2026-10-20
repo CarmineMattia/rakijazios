@@ -4,6 +4,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeHostTool } from "./host-tools.ts";
+import { sandboxStatus } from "./sandbox.ts";
+
+// Shell tests need bubblewrap. CI sets RAKAZO_TEST_REQUIRE_SANDBOX=1 so they can't be skipped there.
+const skipNoSandbox =
+  !sandboxStatus().ok && process.env.RAKAZO_TEST_REQUIRE_SANDBOX !== "1" ? "bubblewrap sandbox unavailable" : false;
 
 describe("host-tools", () => {
   it("lists and reads files under the host root", async () => {
@@ -32,7 +37,7 @@ describe("host-tools", () => {
     }
   });
 
-  it("writes files and runs a command", async () => {
+  it("writes files and runs a command", { skip: skipNoSandbox }, async () => {
     const root = await mkdtemp(join(tmpdir(), "rk-host-"));
     try {
       const wrote = await executeHostTool({
@@ -91,23 +96,27 @@ describe("host-tools", () => {
     if (!res.ok) assert.equal(res.denied, true);
   });
 
-  it("blocks network tools when egress is off", async () => {
+  it("network off is a real control: the shell has no interfaces but loopback", { skip: skipNoSandbox }, async () => {
     const root = await mkdtemp(join(tmpdir(), "rk-host-"));
     try {
+      // curl is no longer blocked by a word filter; the sandbox has an empty network namespace.
       const res = await executeHostTool({
         action: "run-command",
-        args: { command: "curl https://example.com" },
+        args: { command: "tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' '; (exec 3<>/dev/tcp/1.1.1.1/53) 2>/dev/null && echo CONNECTED || echo NOCONN" },
         hostRoot: root,
         egressAllowed: false,
       });
-      assert.equal(res.ok, false);
-      if (!res.ok) assert.equal(res.denied, true);
+      assert.equal(res.ok, true);
+      if (res.ok) {
+        const lines = String(res.output.stdout).trim().split("\n");
+        assert.deepEqual(lines, ["lo", "NOCONN"]);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("starts and kills a background shell", async () => {
+  it("starts and kills a background shell", { skip: skipNoSandbox }, async () => {
     const root = await mkdtemp(join(tmpdir(), "rk-host-"));
     try {
       const started = await executeHostTool({
