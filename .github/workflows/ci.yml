@@ -27,7 +27,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18"
+      - name: Shell sandbox prerequisites (bubblewrap + unprivileged user namespaces)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor; bwrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-all --die-with-parent true
       - name: Pull app image
         run: docker pull "$RAKAZO_APP_IMAGE"
       - name: Checks
+        env:
+          # The sandbox tests must run (not skip) in CI.
+          RAKAZO_TEST_REQUIRE_SANDBOX: "1"
         run: scripts/ci-test.sh
+      - name: Boot smoke (api + migrations + patch DDL on a throwaway PostgreSQL)
+        run: scripts/ci-boot.sh
