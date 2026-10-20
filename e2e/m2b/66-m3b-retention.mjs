@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // M3b(c) e2e: usage retention folds old raw rows into daily totals; the usage API (chart + people) is unchanged.
 // Uses synthetic rows owned by the qa account on a fake device id; aborts if a sweep would touch anyone else.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { launch, login, api, sql, BASE, OUT, QA_EMAIL, QA2_EMAIL, q } from '../m2a/lib.mjs';
+import { launch, login, api, sql, BASE, OUT, API_CONTAINER, QA_EMAIL, QA2_EMAIL, q } from '../m2a/lib.mjs';
 
 const results = []; let failed = 0;
 const ok = (name, got, pass) => { results.push({ name, pass: !!pass, got }); if (!pass) failed++; console.log(`${pass ? 'PASS' : 'FAIL'} ${name} ${JSON.stringify(got)}`); };
@@ -50,7 +50,11 @@ try {
   ok('idempotent', again.applied, again.applied.folded === 0);
   ok('stillUnchanged', null, JSON.stringify((await usage()).daily) === JSON.stringify(before.daily));
   ok('defaultIs90', retention().days, retention().days === 90);
-  ok('apiLogClean', null, !/usage retention sweep failed/.test(execFileSync('docker', ['logs', '--since', '10m', 'rakazo-api-1'], { stdio: ['ignore', 'pipe', 'pipe'] }).toString()));
+  // The sweep reports failures with console.warn (stderr), and a busy api writes well over the
+  // default 1 MB in 10 min (ENOBUFS), so read both streams with a large buffer.
+  const apiLogs = spawnSync('docker', ['logs', '--since', '10m', API_CONTAINER], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  ok('apiLogsRead', apiLogs.error?.code ?? apiLogs.status, !apiLogs.error && apiLogs.status === 0);
+  ok('apiLogClean', null, !/usage retention sweep failed/.test(`${apiLogs.stdout}\n${apiLogs.stderr}`));
 } finally {
   cleanup();
   await browser?.close();
