@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@rakazo/db";
 import type { Context, Hono } from "hono";
 import type { LocalRunnerGateway } from "./local-runners.js";
-import { ensureHostToolPermissionTables } from "./host-tool-permissions.js";
+import { decideHostToolPermission, ensureHostToolPermissionTables } from "./host-tool-permissions.js";
 
 type SessionAuth = {
   api: {
@@ -108,7 +108,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/routines",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const bot = await prisma.bot.findFirst({
         where: { id: botId, userId: uid },
         select: { id: true, name: true },
@@ -142,8 +142,8 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/routines/:routineId/pause",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
-      const routineId = c.req.param("routineId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
+      const routineId = (c.req.param("routineId") ?? "").slice(0, 64);
       const bot = await prisma.bot.findFirst({ where: { id: botId, userId: uid }, select: { id: true } });
       if (!bot) throw new HttpError(404, "Not found");
       try {
@@ -167,8 +167,8 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/routines/:routineId/resume",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
-      const routineId = c.req.param("routineId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
+      const routineId = (c.req.param("routineId") ?? "").slice(0, 64);
       const bot = await prisma.bot.findFirst({ where: { id: botId, userId: uid }, select: { id: true } });
       if (!bot) throw new HttpError(404, "Not found");
       try {
@@ -192,8 +192,8 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/routines/:routineId/run-now",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
-      const routineId = c.req.param("routineId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
+      const routineId = (c.req.param("routineId") ?? "").slice(0, 64);
       const bot = await prisma.bot.findFirst({ where: { id: botId, userId: uid }, select: { id: true } });
       if (!bot) throw new HttpError(404, "Not found");
       let found = false;
@@ -222,7 +222,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/transcripts",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const bot = await prisma.bot.findFirst({ where: { id: botId, userId: uid }, select: { id: true } });
       if (!bot) throw new HttpError(404, "Not found");
       const rows = await prisma.$queryRawUnsafe<
@@ -248,7 +248,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/transcripts/:id",
     route(async (c) => {
       const uid = await userId(c);
-      const id = c.req.param("id").slice(0, 64);
+      const id = (c.req.param("id") ?? "").slice(0, 64);
       const rows = await prisma.$queryRawUnsafe<
         Array<{ id: string; run_id: string; summary: string; body: string; created_at: Date }>
       >(
@@ -321,6 +321,31 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
         });
         if (!bot) throw new HttpError(404, "Bot not found");
       }
+      // The device must belong to the caller, and the host-tool permission policy
+      // (ceiling, auto-review, standing grants, always/ask/never) applies like any run-command.
+      if (deviceId) {
+        const owned = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+          `SELECT id FROM local_runner_devices WHERE id = $1 AND user_id = $2 AND status = 'active'`,
+          deviceId,
+          uid,
+        );
+        if (!owned[0]) throw new HttpError(404, "Device not found");
+        const decision = await decideHostToolPermission(prisma, {
+          userId: uid,
+          deviceId,
+          action: "run-command",
+          target: command,
+        });
+        if (decision.kind === "deny") {
+          throw new HttpError(403, "Host tool denied by permission policy.");
+        }
+        if (decision.kind === "ask") {
+          return c.json(
+            { error: "Host tool needs your approval.", needsPermission: true, action: "run-command" },
+            409,
+          );
+        }
+      }
       const id = randomUUID();
       await prisma.$executeRawUnsafe(
         `INSERT INTO background_shells
@@ -368,7 +393,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/background-shells/:id/kill",
     route(async (c) => {
       const uid = await userId(c);
-      const id = c.req.param("id").slice(0, 64);
+      const id = (c.req.param("id") ?? "").slice(0, 64);
       const rows = await prisma.$queryRawUnsafe<
         Array<{ id: string; device_id: string | null; pid: number | null; status: string }>
       >(
@@ -404,7 +429,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/background-shells/:id/send-input",
     route(async (c) => {
       const uid = await userId(c);
-      const id = c.req.param("id").slice(0, 64);
+      const id = (c.req.param("id") ?? "").slice(0, 64);
       const body = await readJson(c);
       const text = typeof body.text === "string" ? body.text.slice(0, 16_000) : "";
       if (!text) throw new HttpError(400, "text required");
@@ -470,35 +495,19 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/secrets",
     route(async (c) => {
       const uid = await userId(c);
+      // Secret rows carry only id/kind/ciphertext/createdAt; never return ciphertext.
       const secrets = await prisma.secret.findMany({
         where: { userId: uid, spaceId: null },
-        select: { id: true, name: true, createdAt: true, updatedAt: true },
-        orderBy: { updatedAt: "desc" },
+        select: { id: true, kind: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
         take: 200,
-      }).catch(async () => {
-        // Older schemas may use different columns
-        return prisma.$queryRawUnsafe<
-          Array<{ id: string; name: string; created_at: Date; updated_at: Date }>
-        >(
-          `SELECT id, name, "createdAt" AS created_at, "updatedAt" AS updated_at
-           FROM secrets WHERE "userId" = $1 AND "spaceId" IS NULL
-           ORDER BY "updatedAt" DESC LIMIT 200`,
-          uid,
-        ).then((rows) =>
-          rows.map((r) => ({
-            id: r.id,
-            name: r.name,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          })),
-        );
       });
       return c.json({
         secrets: secrets.map((s) => ({
           id: s.id,
-          name: s.name,
-          createdAt: s.createdAt instanceof Date ? s.createdAt.toISOString() : String(s.createdAt),
-          updatedAt: s.updatedAt instanceof Date ? s.updatedAt.toISOString() : String(s.updatedAt),
+          name: s.kind,
+          kind: s.kind,
+          createdAt: s.createdAt.toISOString(),
         })),
       });
     }),
@@ -509,7 +518,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/devices/:deviceId/computer-use",
     route(async (c) => {
       const uid = await userId(c);
-      const deviceId = c.req.param("deviceId").slice(0, 64);
+      const deviceId = (c.req.param("deviceId") ?? "").slice(0, 64);
       const rows = await prisma.$queryRawUnsafe<
         Array<{ id: string; computer_use_gate: boolean; capabilities: string }>
       >(
@@ -539,7 +548,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/devices/:deviceId/computer-use",
     route(async (c) => {
       const uid = await userId(c);
-      const deviceId = c.req.param("deviceId").slice(0, 64);
+      const deviceId = (c.req.param("deviceId") ?? "").slice(0, 64);
       const body = await readJson(c);
       const gateOn = body.gateOn === true;
       const n = await prisma.$executeRawUnsafe(
@@ -603,7 +612,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/bots/:botId/publish",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const body = await readJson(c);
       const published = body.published !== false;
       const bot = await prisma.bot.findFirst({
@@ -653,7 +662,7 @@ export function mountParityRoutes(app: Hono, deps: ParityRouteDeps): void {
     "/api/parity/marketplace/:botId/add-to-chat",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const listings = await prisma.$queryRawUnsafe<
         Array<{ bot_id: string; owner_user_id: string; published: boolean; title: string }>
       >(

@@ -1048,7 +1048,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     "/api/local-runners/bots/:botId",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const bots = await prisma.$queryRawUnsafe<
         Array<{ id: string; model_provider: string | null; model_id: string | null }>
       >(
@@ -1089,7 +1089,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     "/api/local-runners/bots/:botId/model",
     route(async (c) => {
       const uid = await userId(c);
-      const botId = c.req.param("botId").slice(0, 64);
+      const botId = (c.req.param("botId") ?? "").slice(0, 64);
       const body = await readBody(c);
       const bots = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
         `SELECT id FROM bots WHERE id = $1 AND "userId" = $2`,
@@ -1154,7 +1154,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     "/api/local-runners/groups/:groupId/grants",
     route(async (c) => {
       const uid = await userId(c);
-      const groupId = c.req.param("groupId").slice(0, 64);
+      const groupId = (c.req.param("groupId") ?? "").slice(0, 64);
       const group = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
         `SELECT id FROM chat_groups WHERE id = $1 AND "userId" = $2`,
         groupId,
@@ -1186,7 +1186,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     "/api/local-runners/groups/:groupId/grants",
     route(async (c) => {
       const uid = await userId(c);
-      const groupId = c.req.param("groupId").slice(0, 64);
+      const groupId = (c.req.param("groupId") ?? "").slice(0, 64);
       const body = await readBody(c);
       const botId = typeof body.botId === "string" ? body.botId.slice(0, 64) : "";
       const allowed = body.allowed === true;

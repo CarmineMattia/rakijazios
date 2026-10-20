@@ -41,7 +41,7 @@ export async function tryOwnerHostTool(input: {
     args: mappedArgs,
   });
 
-  if (hostResult.needsPermission) {
+  if (!hostResult.ok && hostResult.needsPermission) {
     return {
       kind: "needs_permission",
       value: {

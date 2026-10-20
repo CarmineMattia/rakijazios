@@ -2405,7 +2405,15 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 botId: bot.id,
                 toolName: "shell",
                 args: { command, cwd: args.cwd ? String(args.cwd) : "." },
-                redact: (v) => redactAgentCommandResult(v, runSecrets) as Record<string, unknown>,
+                redact: (v) =>
+                  redactAgentCommandResult(
+                    {
+                      stdout: String(v.stdout ?? ""),
+                      stderr: String(v.stderr ?? ""),
+                      code: Number(v.exitCode ?? 0),
+                    },
+                    runSecrets,
+                  ) as unknown as Record<string, unknown>,
               });
               if (hostTry.kind === "needs_permission") return finish(hostTry.value);
               if (hostTry.kind === "result") return finish(hostTry.value);
