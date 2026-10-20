@@ -141,3 +141,52 @@ describe("host-tools", () => {
     if (res.ok) assert.equal(res.output.waitedMs, 10);
   });
 });
+
+describe("host-tools hardening", () => {
+  it("does not follow a symlink inside the root that points outside it", async () => {
+    const { symlink, mkdir } = await import("node:fs/promises");
+    const root = await mkdtemp(join(tmpdir(), "rk-host-"));
+    const outside = await mkdtemp(join(tmpdir(), "rk-out-"));
+    try {
+      await writeFile(join(outside, "secret.txt"), "outside", "utf8");
+      await symlink(outside, join(root, "link"));
+      await mkdir(join(root, "real"));
+      for (const [action, args] of [
+        ["read-file", { path: "link/secret.txt" }],
+        ["list-directory", { path: "link" }],
+        ["write-file", { path: "link/new.txt", content: "x" }],
+        ["run-command", { command: "pwd", cwd: "link" }],
+      ] as const) {
+        const res = await executeHostTool({ action, args: { ...args }, hostRoot: root });
+        assert.equal(res.ok, false, action);
+        if (!res.ok) assert.match(res.error, /escapes/i);
+      }
+      await assert.rejects(readFile(join(outside, "new.txt"), "utf8"));
+      const inside = await executeHostTool({
+        action: "write-file",
+        args: { path: "real/sub/new.txt", content: "ok" },
+        hostRoot: root,
+      });
+      assert.equal(inside.ok, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("kill-shell refuses an arbitrary pid that is not one of its background shells", async () => {
+    const { spawn } = await import("node:child_process");
+    const victim = spawn("sleep", ["30"]);
+    try {
+      const res = await executeHostTool({
+        action: "kill-shell",
+        args: { shellId: "nope", pid: victim.pid },
+      });
+      assert.equal(res.ok, false);
+      assert.equal(victim.exitCode, null);
+      assert.equal(victim.signalCode, null);
+    } finally {
+      victim.kill("SIGKILL");
+    }
+  });
+});

@@ -149,15 +149,26 @@ function defaultRoot(): string {
 async function ensureInsideRoot(root: string, requested: string): Promise<string> {
   await mkdir(root, { recursive: true });
   const rootReal = await realpath(root);
-  const abs = resolve(rootReal, requested.startsWith("/") ? requested.slice(1) : requested);
-  // Create parent so realpath works for new write targets
-  if (abs.startsWith(rootReal + sep) || abs === rootReal) {
-    return abs;
+  const inside = (p: string) => p === rootReal || p.startsWith(rootReal + sep);
+  const rel = requested.replace(/^~\//, "");
+  const abs = resolve(rootReal, rel.startsWith("/") ? rel.slice(1) : rel);
+  if (!inside(abs)) throw new Error(`Path escapes host root (${rootReal})`);
+  // Resolve symlinks on the deepest existing ancestor so a link inside the root
+  // cannot point the read/write/list outside it.
+  let probe = abs;
+  for (;;) {
+    try {
+      const real = await realpath(probe);
+      if (!inside(real)) throw new Error(`Path escapes host root (${rootReal})`);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      const parent = dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
   }
-  // Also allow paths that resolve under root after normalization
-  const candidate = resolve(rootReal, requested.replace(/^~\//, ""));
-  if (candidate.startsWith(rootReal + sep) || candidate === rootReal) return candidate;
-  throw new Error(`Path escapes host root (${rootReal})`);
+  return abs;
 }
 
 type BgShell = {
@@ -397,7 +408,6 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
       case "kill-shell": {
         const shellId = String(args.shellId ?? args.id ?? "");
         const shell = backgroundShells.get(shellId);
-        const pid = Number(args.pid);
         if (shell) {
           try {
             shell.child.kill("SIGTERM");
@@ -421,14 +431,6 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
               stderr: shell.stderr,
             },
           };
-        }
-        if (Number.isFinite(pid) && pid > 0) {
-          try {
-            process.kill(pid, "SIGTERM");
-            return { ok: true, output: { pid, killed: true } };
-          } catch (error) {
-            return { ok: false, error: error instanceof Error ? error.message : String(error) };
-          }
         }
         return { ok: false, error: "Unknown background shell" };
       }
