@@ -27,4 +27,6 @@ RK_OWNER_EMAIL=you@example.com node 51-m2a-owner-view.mjs
 Environment (all optional): `RK_BASE`, `RK_API_DIRECT`, `RK_NPM_DIR`, `RK_CHROME`, `RK_E2E_OUT`
 (screenshots, profiles, `*-results.json`), `RK_PG_CONTAINER`, `RK_API_CONTAINER`, `RK_QA_EMAIL`,
 `RK_QA2_EMAIL`, `RK_REPO`, `RK_M1_REF`. See `lib.mjs`. Run the scripts one at a time, because they
-share browser profiles.
+share browser profiles and the qa account's bot, binding and grants. `lib.mjs` enforces this: importing it takes
+the lock file `RK_E2E_LOCK` (default `/tmp/rk-e2e-qa.lock`). A second script waits up to `RK_E2E_LOCK_WAIT_MS`
+(default 30 min) and prints who holds the lock; a lock left by a dead process is taken over (`lock.mjs`).

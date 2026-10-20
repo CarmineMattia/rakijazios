@@ -7,11 +7,13 @@
 //   RK_E2E_OUT        browser profiles, screenshots, results (default /tmp/rk-e2e)
 //   RK_PG_CONTAINER   postgres container                 (default rakazo-postgres-1)
 //   RK_API_CONTAINER  api container                      (default rakazo-api-1)
+//   RK_E2E_LOCK       one script at a time (default /tmp/rk-e2e-qa.lock, "off" disables), see lock.mjs
 // Login uses a magic link read from the `verification` table, so it only works against a
 // stack you operate. Test accounts default to qa@rakazo.test / qa2@rakazo.test.
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { acquireE2ELock } from './lock.mjs';
 
 const env = (k, d) => process.env[k]?.trim() || d;
 export const BASE = env('RK_BASE', 'http://127.0.0.1:5173');
@@ -21,6 +23,8 @@ export const PG = env('RK_PG_CONTAINER', 'rakazo-postgres-1');
 export const API_CONTAINER = env('RK_API_CONTAINER', 'rakazo-api-1');
 export const QA_EMAIL = env('RK_QA_EMAIL', 'qa@rakazo.test');
 export const QA2_EMAIL = env('RK_QA2_EMAIL', 'qa2@rakazo.test');
+// Importing the helpers takes the per-stack e2e lock (released when the process exits).
+await acquireE2ELock(env('RK_E2E_LOCK', '/tmp/rk-e2e-qa.lock'), { waitMs: Number(env('RK_E2E_LOCK_WAIT_MS', String(30 * 60_000))) });
 const require = createRequire(join(env('RK_NPM_DIR', '/tmp/rk-e2e-npm'), 'package.json'));
 const puppeteer = require('puppeteer-core');
 
