@@ -13,6 +13,9 @@ export type HelloFrame = {
   platform?: string;
   /** M2a: which local server was found, e.g. "ollama"; "none" when nothing answers */
   modelServer?: string;
+  /** P1+: e.g. ["inference","host-tools","computer-use"] */
+  capabilities?: string[];
+  computerUseGate?: boolean;
 };
 
 export type HeartbeatFrame = { type: "heartbeat"; at?: number };
@@ -90,6 +93,29 @@ export type HealthCheckFrame = { type: "health.check"; id: string };
 /** reason: "revoked" | "rotated" | "replaced" | "maintenance" | … */
 export type ByeFrame = { type: "bye"; reason?: string };
 
+/** P1 host-tools: server asks the runner to run a local action. */
+export type ToolInvokeFrame = {
+  type: "tool.invoke";
+  id: string;
+  action: string;
+  args: Record<string, unknown>;
+  timeoutMs?: number;
+};
+
+export type ToolResultFrame = {
+  type: "tool.result";
+  id: string;
+  ok: boolean;
+  output?: Record<string, unknown>;
+  error?: string;
+};
+
+export type ToolDeniedFrame = {
+  type: "tool.denied";
+  id: string;
+  reason?: string;
+};
+
 export type ClientToServerFrame =
   | HelloFrame
   | HeartbeatFrame
@@ -97,7 +123,9 @@ export type ClientToServerFrame =
   | InferChunkFrame
   | InferDoneFrame
   | InferErrorFrame
-  | HealthFrame;
+  | HealthFrame
+  | ToolResultFrame
+  | ToolDeniedFrame;
 
 export type ServerToClientFrame =
   | HeartbeatAckFrame
@@ -105,7 +133,8 @@ export type ServerToClientFrame =
   | InferCancelFrame
   | PolicyFrame
   | ByeFrame
-  | HealthCheckFrame;
+  | HealthCheckFrame
+  | ToolInvokeFrame;
 
 export type ProtocolFrame = ClientToServerFrame | ServerToClientFrame;
 
@@ -117,6 +146,8 @@ const CLIENT_TYPES = new Set([
   "infer.done",
   "infer.error",
   "health",
+  "tool.result",
+  "tool.denied",
 ]);
 
 const SERVER_TYPES = new Set([
@@ -126,6 +157,7 @@ const SERVER_TYPES = new Set([
   "policy",
   "bye",
   "health.check",
+  "tool.invoke",
 ]);
 
 export function encodeFrame(frame: ProtocolFrame): string {

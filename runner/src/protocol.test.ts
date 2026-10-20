@@ -28,6 +28,25 @@ describe("protocol codec", () => {
     assert.equal(isServerFrame(decoded), true);
   });
 
+  it("round-trips tool.invoke / tool.result", () => {
+    const invoke = {
+      type: "tool.invoke" as const,
+      id: "t1",
+      action: "run-command",
+      args: { command: "echo hi" },
+    };
+    assert.deepEqual(decodeFrame(encodeFrame(invoke)), invoke);
+    assert.equal(isServerFrame(invoke), true);
+    const result = {
+      type: "tool.result" as const,
+      id: "t1",
+      ok: true,
+      output: { stdout: "hi\n" },
+    };
+    assert.deepEqual(decodeFrame(encodeFrame(result)), result);
+    assert.equal(isClientFrame(result), true);
+  });
+
   it("rejects unknown type", () => {
     assert.throws(() => decodeFrame(JSON.stringify({ type: "nope" })), /Unknown frame type/);
   });

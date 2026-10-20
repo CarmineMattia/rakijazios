@@ -2,7 +2,8 @@
 # Rakijazios checks (CI and local): runner tests, typecheck and unit tests of the patches.
 # Typecheck/unit tests run inside the published app image with this checkout's patches mounted
 # exactly like docker-compose.override.yml does on Host-001. Exits non-zero on any failure.
-#   scripts/ci-test.sh            (needs node >= 22.18 and docker)
+#   scripts/ci-test.sh            (needs node >= 22.18, docker; bubblewrap for the shell sandbox tests)
+#   RAKAZO_TEST_REQUIRE_SANDBOX=1 makes the sandbox tests mandatory (CI sets it).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 # Pinned to the image Host-001 runs (the patches target it); upstream :edge moves on and breaks the typecheck.

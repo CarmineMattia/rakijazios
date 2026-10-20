@@ -368,6 +368,19 @@ type RunnerSession = {
   runnerVersion: string;
   inFlight: Set<string>;
   health: RunnerHealth | null;
+  /** P1+: capabilities from hello (inference, host-tools, computer-use). */
+  capabilities: Set<string>;
+};
+
+type PendingTool = {
+  id: string;
+  done: boolean;
+  ok?: boolean;
+  output?: Record<string, unknown>;
+  error?: string;
+  denied?: boolean;
+  waiters: Array<() => void>;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 /** What a 0.2.3+ runner reports about itself (sanitized). */
@@ -575,6 +588,15 @@ export function ensureLocalRunnerTables(prisma: PrismaClient): Promise<void> {
       await prisma.$executeRawUnsafe(
         `CREATE INDEX IF NOT EXISTS local_runner_usage_daily_owner_idx ON local_runner_usage_daily (owner_user_id, day)`,
       );
+      // Host-tool / computer-use capabilities advertised by the runner (P1/P5)
+      for (const column of [
+        "capabilities TEXT NOT NULL DEFAULT '[\"inference\"]'",
+        "computer_use_gate BOOLEAN NOT NULL DEFAULT false",
+      ]) {
+        await prisma.$executeRawUnsafe(
+          `ALTER TABLE local_runner_devices ADD COLUMN IF NOT EXISTS ${column}`,
+        );
+      }
     })().catch((error) => {
       ready.delete(prisma);
       throw error;
@@ -693,6 +715,18 @@ export type LocalRunnerGateway = {
   checkDevice: (deviceId: string) => Promise<DeviceCheckResult>;
   /** M2c: stop in-flight answers of a bot in a group (grant revoked). Returns how many. */
   cancelBotInGroup: (botId: string, groupId: string) => number;
+  /** P1: device session has host-tools capability. */
+  deviceSupportsHostTools: (deviceId: string) => boolean;
+  /** P1: invoke a host tool on the runner and wait for the result. */
+  invokeHostTool: (
+    deviceId: string,
+    request: {
+      id: string;
+      action: string;
+      args: Record<string, unknown>;
+      timeoutMs?: number;
+    },
+  ) => Promise<{ ok: boolean; output?: Record<string, unknown>; error?: string; denied?: boolean }>;
 };
 
 /**
@@ -755,6 +789,15 @@ export function createLocalRunnerGateway(deps: {
   const sessionsByDevice = new Map<string, RunnerSession>();
   const sessionsByUser = new Map<string, Set<RunnerSession>>();
   const pending = new Map<string, PendingInfer>();
+  const pendingTools = new Map<string, PendingTool>();
+  function finishTool(id: string, patch: Partial<PendingTool>): void {
+    const p = pendingTools.get(id);
+    if (!p || p.done) return;
+    Object.assign(p, patch, { done: true });
+    clearTimeout(p.timer);
+    const waiters = p.waiters.splice(0);
+    for (const w of waiters) w();
+  }
   // Health view per computer, kept across reconnects (in memory; resets when the api restarts).
   type DeviceStats = { answers: number; lastAnswerAt: number | null; lastFailure: { message: string; at: number } | null; lastDisconnect: { reason: string; at: number } | null };
   const stats = new Map<string, DeviceStats>();
@@ -1001,6 +1044,10 @@ export function createLocalRunnerGateway(deps: {
             // One live session per computer; other computers of the same owner stay.
             const existing = sessionsByDevice.get(auth.device.id);
             if (existing) dropSession(existing, "replaced");
+            const capsRaw = Array.isArray(frame.capabilities)
+              ? frame.capabilities.filter((x): x is string => typeof x === "string")
+              : ["inference"];
+            const capabilities = new Set(capsRaw.length ? capsRaw : ["inference"]);
             session = {
               deviceId: auth.device.id,
               userId: auth.device.user_id,
@@ -1015,9 +1062,19 @@ export function createLocalRunnerGateway(deps: {
               runnerVersion: auth.runnerVersion,
               inFlight: new Set(),
               health: null,
+              capabilities,
             };
             sessionsByDevice.set(session.deviceId, session);
             userSessions(session.userId).add(session);
+            void deps.prisma
+              .$executeRawUnsafe(
+                `UPDATE local_runner_devices SET capabilities = $2, computer_use_gate = $3, updated_at = NOW()
+                 WHERE id = $1`,
+                session.deviceId,
+                JSON.stringify([...capabilities]),
+                capabilities.has("computer-use"),
+              )
+              .catch(() => undefined);
             sendPolicy(session);
           } finally {
             done();
@@ -1048,6 +1105,27 @@ export function createLocalRunnerGateway(deps: {
           current.allowedModels = new Set(await syncAdvertisedModels(deps.prisma, device, models));
           current.enabled = device.enabled !== false;
           sendPolicy(current);
+          return;
+        }
+        if (frame.type === "tool.result") {
+          const id = typeof frame.id === "string" ? frame.id : "";
+          finishTool(id, {
+            ok: frame.ok === true,
+            output:
+              frame.output && typeof frame.output === "object" && !Array.isArray(frame.output)
+                ? (frame.output as Record<string, unknown>)
+                : undefined,
+            error: typeof frame.error === "string" ? frame.error : undefined,
+          });
+          return;
+        }
+        if (frame.type === "tool.denied") {
+          const id = typeof frame.id === "string" ? frame.id : "";
+          finishTool(id, {
+            ok: false,
+            denied: true,
+            error: typeof frame.reason === "string" ? frame.reason : "Denied on the computer",
+          });
           return;
         }
         if (frame.type === "health") {
@@ -1525,6 +1603,57 @@ export function createLocalRunnerGateway(deps: {
   return {
     isOwnerOnline(userId: string) {
       return ownerSessions(userId).length > 0;
+    },
+    deviceSupportsHostTools(deviceId: string) {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return false;
+      return session.capabilities.has("host-tools") && session.enabled;
+    },
+    async invokeHostTool(deviceId, request) {
+      const session = sessionsByDevice.get(deviceId);
+      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
+        return { ok: false, error: OFFLINE_MESSAGE };
+      }
+      if (!session.capabilities.has("host-tools")) {
+        return { ok: false, error: "This computer does not expose host tools." };
+      }
+      const timeoutMs = Math.min(Math.max(request.timeoutMs ?? 60_000, 1_000), 10 * 60_000);
+      const p: PendingTool = {
+        id: request.id,
+        done: false,
+        waiters: [],
+        timer: setTimeout(() => {
+          finishTool(request.id, { ok: false, error: "Host tool timed out" });
+        }, timeoutMs),
+      };
+      pendingTools.set(request.id, p);
+      try {
+        session.ws.send(
+          JSON.stringify({
+            type: "tool.invoke",
+            id: request.id,
+            action: request.action,
+            args: request.args,
+            timeoutMs,
+          }),
+        );
+      } catch {
+        finishTool(request.id, { ok: false, error: OFFLINE_MESSAGE });
+      }
+      await new Promise<void>((resolve) => {
+        if (p.done) {
+          resolve();
+          return;
+        }
+        p.waiters.push(() => resolve());
+      });
+      pendingTools.delete(request.id);
+      return {
+        ok: p.ok === true,
+        output: p.output,
+        error: p.error,
+        denied: p.denied,
+      };
     },
     deviceInfo(deviceId: string): DeviceLiveInfo {
       const session = sessionsByDevice.get(deviceId);

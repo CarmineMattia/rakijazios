@@ -496,6 +496,9 @@ export interface ExecutorDeps {
   cloudAgent?: CloudAgentConnection | null;
   /** Aborted when createApp stop() begins so in-flight continueRun boot waits exit promptly. */
   shutdownSignal?: AbortSignal;
+  /** P1: optional host-tool bridge to the owner's local runner. */
+  hostTools?: import("./host-tool-bridge.js").HostToolGateway;
+  /** Owner user id resolver is via bot.userId on the run path. */
 }
 
 function isAuditableToolResult(value: unknown): value is {
@@ -2139,6 +2142,19 @@ export function createRunExecutor(deps: ExecutorDeps) {
           }
           if (name === "list_files") {
             const requestedPath = String(args.path ?? "");
+            {
+              const { tryOwnerHostTool } = await import("./host-tool-try.js");
+              const hostTry = await tryOwnerHostTool({
+                prisma: deps.prisma,
+                hostTools: deps.hostTools,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
+                botId: bot.id,
+                toolName: name,
+                args: { path: requestedPath },
+              });
+              if (hostTry.kind === "needs_permission") return hostTry.value;
+              if (hostTry.kind === "result") return hostTry.value;
+            }
             const entries = await deps.sandbox.listFiles(
               computer,
               resolveBotWorkspacePath(computerMode, bot.id, requestedPath),
@@ -2154,6 +2170,26 @@ export function createRunExecutor(deps: ExecutorDeps) {
           }
           if (name === "read_file") {
             const filePath = String(args.path ?? "");
+            {
+              const { tryOwnerHostTool } = await import("./host-tool-try.js");
+              const hostTry = await tryOwnerHostTool({
+                prisma: deps.prisma,
+                hostTools: deps.hostTools,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
+                botId: bot.id,
+                toolName: name,
+                args: { path: filePath },
+                redact: (v) => ({
+                  ...v,
+                  content:
+                    typeof v.content === "string"
+                      ? redactSecrets(v.content, runSecrets)
+                      : v.content,
+                }),
+              });
+              if (hostTry.kind === "needs_permission") return hostTry.value;
+              if (hostTry.kind === "result") return hostTry.value;
+            }
             const storedPath = resolveBotWorkspacePath(computerMode, bot.id, filePath);
             let bytes: Uint8Array;
             try {
@@ -2194,6 +2230,22 @@ export function createRunExecutor(deps: ExecutorDeps) {
           if (name === "write_file") {
             const filePath = String(args.path ?? "notes/result.txt");
             const content = textContentArg(args.content, "");
+            {
+              const { tryOwnerHostTool } = await import("./host-tool-try.js");
+              const hostTry = await tryOwnerHostTool({
+                prisma: deps.prisma,
+                hostTools: deps.hostTools,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
+                botId: bot.id,
+                toolName: name,
+                args: { path: filePath, content },
+              });
+              if (hostTry.kind === "needs_permission") return hostTry.value;
+              if (hostTry.kind === "result") {
+                workspaceCheckpoint.markDirty();
+                return hostTry.value;
+              }
+            }
             workspaceCheckpoint.markDirty();
             await deps.sandbox.writeFile(
               computer,
@@ -2342,6 +2394,29 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 error:
                   "Computer lifecycle commands are unavailable. Keep the browser and desktop running; use computer_observe, computer_act, open_path, or launch_app instead.",
               });
+            }
+            // P1: prefer owner's host-tools runner when available.
+            {
+              const { tryOwnerHostTool } = await import("./host-tool-try.js");
+              const hostTry = await tryOwnerHostTool({
+                prisma: deps.prisma,
+                hostTools: deps.hostTools,
+                ownerUserId: (bot as { userId?: string }).userId ?? "", // owner only, never the run actor (resolved again from bots in tryOwnerHostTool)
+                botId: bot.id,
+                toolName: "shell",
+                args: { command, cwd: args.cwd ? String(args.cwd) : "." },
+                redact: (v) =>
+                  redactAgentCommandResult(
+                    {
+                      stdout: String(v.stdout ?? ""),
+                      stderr: String(v.stderr ?? ""),
+                      code: Number(v.exitCode ?? 0),
+                    },
+                    runSecrets,
+                  ) as unknown as Record<string, unknown>,
+              });
+              if (hostTry.kind === "needs_permission") return finish(hostTry.value);
+              if (hostTry.kind === "result") return finish(hostTry.value);
             }
             const cwd = resolveBotWorkspaceCwd(
               computerMode,

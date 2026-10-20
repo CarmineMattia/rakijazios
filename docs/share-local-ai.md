@@ -3,6 +3,7 @@
 Status: **M1 implemented** (owner-only, same-host prototype; see §10 → M1 as built). M2+ is design only.  
 Related roadmap: README → Roadmap → Share your local AI / Bot marketplace / Device node app (M5) / Device control mode.  
 Audience: implementers of `rakijazios` overlays and any future upstream contribution.
+Related: Grok Bot parity track — [`parity.md`](parity.md).
 
 ## 1. Problem
 

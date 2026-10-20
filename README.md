@@ -171,7 +171,9 @@ has the project map, exact commands and the **hard rules** (no secrets, backups,
 | [docs/operations.md](docs/operations.md) | Live stack, deploys + backups, tests, known limits |
 | [docs/roadmap.md](docs/roadmap.md) | Full roadmap |
 | [docs/share-local-ai.md](docs/share-local-ai.md) | Share-your-local-AI design (M1–M5) |
+| [docs/parity.md](docs/parity.md) | Grok Bot parity track (host-tools, routines, marketplace, desktop) |
 | [runner/README.md](runner/README.md) | The local runner |
+| [packages/desktop/README.md](packages/desktop/README.md) | Electron device-node shell |
 | [AGENTS.md](AGENTS.md) | Guide for AI coding agents |
 
 <a id="license"></a>

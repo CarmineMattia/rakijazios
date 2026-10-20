@@ -358,6 +358,10 @@ export async function createApp(
     CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
   });
   const shutdown = new AbortController();
+  // Filled after createLocalRunnerGateway (same process); executor closes over the ref.
+  const hostToolsRef: {
+    current: import("./host-tool-bridge.js").HostToolGateway | undefined;
+  } = { current: undefined };
   const executor = createRunExecutor({
     prisma,
     runtime,
@@ -395,6 +399,16 @@ export async function createApp(
     web: createWebProvider(),
     cloudAgent,
     shutdownSignal: shutdown.signal,
+    hostTools: {
+      deviceSupportsHostTools: (deviceId) =>
+        hostToolsRef.current?.deviceSupportsHostTools(deviceId) ?? false,
+      invokeHostTool: (deviceId, request) => {
+        if (!hostToolsRef.current) {
+          return Promise.resolve({ ok: false, error: "Host tools gateway not ready" });
+        }
+        return hostToolsRef.current.invokeHostTool(deviceId, request);
+      },
+    },
   });
 
   const jobHandlers = createBackgroundJobHandlers({
@@ -548,6 +562,7 @@ export async function createApp(
   mountGroupSharing(app, { prisma, auth, sessionHeaders, events, jobs });
   await ensureLocalRunnerTables(prisma);
   const localRunnerGateway = createLocalRunnerGateway({ prisma });
+  hostToolsRef.current = localRunnerGateway;
   // Rakijazios M2a: cookie mutations on My hardware must come from our origin.
   // Runners and the worker send no Origin header, so they pass unchanged.
   app.use("/api/local-runners/*", trustedSocialMutation);
@@ -557,6 +572,20 @@ export async function createApp(
     auth,
     sessionHeaders,
     gateway: localRunnerGateway,
+    webOrigin: env.webOrigin,
+  });
+  const { mountHostToolControl } = await import("./host-tool-control.js");
+  const { ensureHostToolPermissionTables } = await import("./host-tool-permissions.js");
+  await ensureHostToolPermissionTables(prisma);
+  app.use("/api/host-tools/*", trustedSocialMutation);
+  app.use("/api/parity/*", trustedSocialMutation);
+  mountHostToolControl(app, { prisma, auth, sessionHeaders });
+  const { mountParityRoutes } = await import("./parity-routes.js");
+  mountParityRoutes(app, {
+    prisma,
+    auth,
+    sessionHeaders,
+    localRunnerGateway,
     webOrigin: env.webOrigin,
   });
   mountComputerSettings(app, {

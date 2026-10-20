@@ -7,6 +7,8 @@ import {
 import { assertSameOriginLoopback, loopbackRequestUrl } from "./loopback.ts";
 import type { RunnerCredentials, RunnerStatus } from "./config.ts";
 import { discoverModelServer, filterModels, type DiscoveredModel } from "./discover.ts";
+import { executeHostTool } from "./host-tools.ts";
+import { effectiveLocalPolicy, loadPermissions } from "./permissions.ts";
 
 export type { RunnerCredentials } from "./config.ts";
 
@@ -68,6 +70,9 @@ export class LocalRunnerClient {
   private healthKey = "";
   /** The last probe found a model server (a pinned URL can be set but not answering). */
   private serverOk = false;
+  private computerUseGate = process.env.RAKAZO_COMPUTER_USE_GATE === "1";
+  private hostToolsEnabled = process.env.RAKAZO_HOST_TOOLS === "1"; // host tools are opt-in (default OFF)
+  private egressAllowed = process.env.RAKAZO_HOST_EGRESS === "1";
 
   constructor(opts: RunnerOptions) {
     this.opts = opts;
@@ -245,6 +250,9 @@ export class LocalRunnerClient {
       // The backoff resets only once the server accepts the hello (first policy).
       this.log("connected; sending hello");
       // The device token goes in the first frame, never in the URL.
+      const capabilities = ["inference"];
+      if (this.hostToolsEnabled) capabilities.push("host-tools");
+      if (this.computerUseGate) capabilities.push("computer-use");
       this.send({
         type: "hello",
         deviceId: this.opts.credentials.deviceId,
@@ -253,6 +261,8 @@ export class LocalRunnerClient {
         offeredModels: this.models.map((m) => m.id),
         ...(this.opts.platform ? { platform: this.opts.platform } : {}),
         modelServer: this.server?.kind ?? "none",
+        capabilities,
+        computerUseGate: this.computerUseGate,
       });
       // The detailed models frame follows the first policy (hello accepted).
       this.clearHeartbeat();
@@ -383,6 +393,54 @@ export class LocalRunnerClient {
           this.fatal(frame.reason);
         }
         return;
+      case "tool.invoke": {
+        if (!this.hostToolsEnabled) {
+          this.send({
+            type: "tool.denied",
+            id: frame.id,
+            reason: "host-tools disabled on this runner",
+          });
+          return;
+        }
+        void (async () => {
+          const perms = await loadPermissions();
+          const target =
+            typeof frame.args?.command === "string"
+              ? frame.args.command
+              : typeof frame.args?.path === "string"
+                ? frame.args.path
+                : undefined;
+          // Local can tighten, never loosen: the action runs only if permissions.json allows it.
+          const local = effectiveLocalPolicy(
+            perms,
+            { computerUseGate: this.computerUseGate, egressAllowed: this.egressAllowed },
+            frame.action,
+            target,
+          );
+          if (local.localDecision !== "allow") {
+            return { ok: false as const, denied: true, error: local.reason ?? "Denied locally." };
+          }
+          return executeHostTool({
+            action: frame.action,
+            args: frame.args ?? {},
+            timeoutMs: frame.timeoutMs,
+            computerUseGate: local.computerUseGate,
+            egressAllowed: local.egressAllowed,
+            localDecision: local.localDecision,
+          });
+        })().then((result) => {
+          if (!result.ok && result.denied) {
+            this.send({ type: "tool.denied", id: frame.id, reason: result.error });
+            return;
+          }
+          if (!result.ok) {
+            this.send({ type: "tool.result", id: frame.id, ok: false, error: result.error });
+            return;
+          }
+          this.send({ type: "tool.result", id: frame.id, ok: true, output: result.output });
+        });
+        return;
+      }
       case "infer.cancel": {
         const ctrl = this.inFlight.get(frame.id);
         if (ctrl) {

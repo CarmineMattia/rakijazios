@@ -50,6 +50,10 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       window: 60,
       max: 60,
     },
+    // P8: password auth is enabled so Settings can offer "set password" for
+    // magic-link users (Better Auth change-password / set-password endpoints).
+    // Passkey enrollment is exposed via /api/parity/auth/status → /api/auth/passkey
+    // when the deployment adds the Better Auth passkey plugin.
     emailAndPassword: {
       enabled: true,
       // Signup policy is mutable deployment state, so the request hook below

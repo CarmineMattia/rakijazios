@@ -1,0 +1,25 @@
+{
+  "name": "@rakijazios/desktop",
+  "version": "0.1.0-parity",
+  "private": true,
+  "description": "Rakijazios Electron device-node shell (P6): chat + embedded runner + tray",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "app.rakijazios.desktop",
+    "productName": "Rakijazios",
+    "directories": { "output": "dist" },
+    "linux": { "target": ["AppImage"], "category": "Network" },
+    "mac": { "target": ["dmg"] },
+    "win": { "target": ["nsis"] }
+  }
+}
