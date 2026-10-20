@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { executeHostTool } from "./host-tools.ts";
+import { executeHostTool as executeHostToolRaw } from "./host-tools.ts";
+
+// The runner only calls executeHostTool after the local permissions.json allowed the action.
+const executeHostTool = (req: Parameters<typeof executeHostToolRaw>[0]) =>
+  executeHostToolRaw({ localDecision: "allow", ...req });
 import { blockedDomain, checkComputerAction, luhnCardNumber, looksLikeIban } from "./payment-guard.ts";
 
 const win = (title: string, wmClass = "Gedit") => ({ title, wmClass });

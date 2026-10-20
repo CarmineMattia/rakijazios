@@ -8,7 +8,7 @@ import { assertSameOriginLoopback, loopbackRequestUrl } from "./loopback.ts";
 import type { RunnerCredentials, RunnerStatus } from "./config.ts";
 import { discoverModelServer, filterModels, type DiscoveredModel } from "./discover.ts";
 import { executeHostTool } from "./host-tools.ts";
-import { loadPermissions, localAllows } from "./permissions.ts";
+import { effectiveLocalPolicy, loadPermissions } from "./permissions.ts";
 
 export type { RunnerCredentials } from "./config.ts";
 
@@ -410,20 +410,23 @@ export class LocalRunnerClient {
               : typeof frame.args?.path === "string"
                 ? frame.args.path
                 : undefined;
-          const decision = localAllows(perms, frame.action, target);
-          // Server already decided allow; local mirror only hard-denies (never / grant never).
-          // "ask" locally does not re-block — approval UX lives in Rakijazios.
-          const localDecision: "allow" | "deny" =
-            decision === "deny" || perms.permission === "never" || perms.ceiling === "never"
-              ? "deny"
-              : "allow";
+          // Local can tighten, never loosen: the action runs only if permissions.json allows it.
+          const local = effectiveLocalPolicy(
+            perms,
+            { computerUseGate: this.computerUseGate, egressAllowed: this.egressAllowed },
+            frame.action,
+            target,
+          );
+          if (local.localDecision !== "allow") {
+            return { ok: false as const, denied: true, error: local.reason ?? "Denied locally." };
+          }
           return executeHostTool({
             action: frame.action,
             args: frame.args ?? {},
             timeoutMs: frame.timeoutMs,
-            computerUseGate: this.computerUseGate || perms.computerUseGate === true,
-            egressAllowed: this.egressAllowed || perms.egressAllowed === true,
-            localDecision,
+            computerUseGate: local.computerUseGate,
+            egressAllowed: local.egressAllowed,
+            localDecision: local.localDecision,
           });
         })().then((result) => {
           if (!result.ok && result.denied) {

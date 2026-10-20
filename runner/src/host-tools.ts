@@ -6,6 +6,8 @@ import { spawn, spawnSync, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import {
   access,
+  lstat,
+  open,
   mkdir,
   readdir,
   readFile,
@@ -19,6 +21,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { constants as fsConstants } from "node:fs";
 
 import { escalationAttempt, sandboxArgs, sandboxStatus } from "./sandbox.ts";
+import { permissionsPath } from "./permissions.ts";
 import { checkComputerAction, readFocusedWindow, type FocusedWindow } from "./payment-guard.ts";
 
 const execFile = promisify(execFileCb);
@@ -158,22 +161,37 @@ async function ensureInsideRoot(root: string, requested: string): Promise<string
   const rel = requested.replace(/^~\//, "");
   const abs = resolve(rootReal, rel.startsWith("/") ? rel.slice(1) : rel);
   if (!inside(abs)) throw new Error(`Path escapes host root (${rootReal})`);
-  // Resolve symlinks on the deepest existing ancestor so a link inside the root
-  // cannot point the read/write/list outside it.
-  let probe = abs;
-  for (;;) {
+  // Check every existing component below the root: a symlink is only acceptable when it resolves
+  // inside the root. Dangling symlinks are refused (a write would create their target outside).
+  const parts = abs.slice(rootReal.length).split(sep).filter(Boolean);
+  let cur = rootReal;
+  for (const part of parts) {
+    cur = join(cur, part);
+    let st;
     try {
-      const real = await realpath(probe);
-      if (!inside(real)) throw new Error(`Path escapes host root (${rootReal})`);
-      break;
+      st = await lstat(cur);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-      const parent = dirname(probe);
-      if (parent === probe) break;
-      probe = parent;
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") break;
+      throw error;
+    }
+    if (st.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = await realpath(cur);
+      } catch {
+        throw new Error(`Path escapes host root (${rootReal}): dangling symlink ${part}`);
+      }
+      if (!inside(real)) throw new Error(`Path escapes host root (${rootReal})`);
     }
   }
   return abs;
+}
+
+/** Runner config (credentials, permissions.json) must never be reachable from the host root. */
+function configOverlapsRoot(rootReal: string): string | null {
+  const cfg = resolve(dirname(permissionsPath()));
+  const within = (a: string, b: string) => a === b || a.startsWith(b + sep);
+  return within(cfg, rootReal) || within(rootReal, cfg) ? cfg : null;
 }
 
 type BgShell = {
@@ -210,6 +228,10 @@ async function runCommand(
   const spawnArgs = sandboxArgs({ root, cwd, egressAllowed, command });
   if (opts?.background) {
     const id = opts.shellId || `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (backgroundShells.has(id)) {
+      // never overwrite (and orphan) a running shell
+      return { ok: false, denied: true, error: `Background shell id ${id} is already in use.` };
+    }
     const child = spawn(sandbox.bwrap, spawnArgs, {
       cwd,
       env: {},
@@ -284,7 +306,8 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
   const action = req.action;
   const args = req.args ?? {};
 
-  if (req.localDecision === "deny") {
+  if (req.localDecision !== "allow" && req.localDecision !== "ask") {
+    // Fail closed: no explicit local decision means no host action.
     return { ok: false, denied: true, error: "Denied by local permissions.json" };
   }
   if (req.localDecision === "ask") {
@@ -293,6 +316,17 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
       denied: true,
       error: "Local runner requires an explicit grant (ask). Approve in Rakijazios, then retry.",
     };
+  }
+
+  if (action !== "computer-wait") {
+    const overlap = configOverlapsRoot(resolve(root));
+    if (overlap) {
+      return {
+        ok: false,
+        denied: true,
+        error: `Host tools are refused: the runner config dir (${overlap}) overlaps the host root. Move one of them.`,
+      };
+    }
   }
 
   try {
@@ -310,8 +344,13 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
       case "read-file": {
         const path = String(args.path ?? "");
         const abs = await ensureInsideRoot(root, path);
-        await access(abs, fsConstants.R_OK);
-        const bytes = await readFile(abs);
+        const rfh = await open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        let bytes: Buffer;
+        try {
+          bytes = await rfh.readFile();
+        } finally {
+          await rfh.close();
+        }
         const max = 256 * 1024;
         const truncated = bytes.length > max;
         const text = bytes.subarray(0, max).toString("utf8");
@@ -322,7 +361,13 @@ export async function executeHostTool(req: HostToolRequest): Promise<HostToolRes
         const content = String(args.content ?? args.text ?? "");
         const abs = await ensureInsideRoot(root, path);
         await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, content, { encoding: "utf8", mode: 0o600 });
+        await ensureInsideRoot(root, path); // re-check after creating parents
+        const fh = await open(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW, 0o600);
+        try {
+          await fh.writeFile(content, "utf8");
+        } finally {
+          await fh.close();
+        }
         return { ok: true, output: { path: abs, bytes: Buffer.byteLength(content) } };
       }
       case "list-directory": {

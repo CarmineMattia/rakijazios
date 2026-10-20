@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeHostTool } from "./host-tools.ts";
+import { executeHostTool as executeHostToolRaw } from "./host-tools.ts";
+
+// The runner only calls executeHostTool after the local permissions.json allowed the action.
+const executeHostTool = (req: Parameters<typeof executeHostToolRaw>[0]) =>
+  executeHostToolRaw({ localDecision: "allow", ...req });
 import { escalationAttempt, resetSandboxCache, sandboxStatus } from "./sandbox.ts";
 
 const skip =

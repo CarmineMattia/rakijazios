@@ -78,3 +78,29 @@ export function localAllows(
   if (file.permission === "always" && !file.ceiling) return "allow";
   return "ask";
 }
+
+/**
+ * Effective local decision for one server tool.invoke. The local file can only tighten what the
+ * server asks for: an action runs only when the local mirror explicitly allows it ("always" or an
+ * "always" grant); the default "ask" refuses. Computer use and network egress need both the env
+ * opt-in on the runner and the local file to enable them.
+ */
+export function effectiveLocalPolicy(
+  file: LocalPermissionFile,
+  env: { computerUseGate: boolean; egressAllowed: boolean },
+  action: string,
+  target?: string,
+): { localDecision: "allow" | "deny"; computerUseGate: boolean; egressAllowed: boolean; reason?: string } {
+  const d = localAllows(file, action, target);
+  return {
+    localDecision: d === "allow" ? "allow" : "deny",
+    reason:
+      d === "deny"
+        ? "Denied by the local permissions.json on this computer."
+        : d === "ask"
+          ? "This computer's permissions.json doesn't allow host tools (permission is 'ask'). Set it to 'always' or add an 'always' grant locally to let approved actions run."
+          : undefined,
+    computerUseGate: env.computerUseGate && file.computerUseGate === true,
+    egressAllowed: env.egressAllowed && file.egressAllowed === true,
+  };
+}
