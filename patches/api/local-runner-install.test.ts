@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -79,7 +79,7 @@ describe("installers", () => {
     expect(ps.indexOf("Move-Item -LiteralPath $App")).toBeGreaterThan(ps.indexOf("& $Node $Staged stop"));
   });
 
-  it.skipIf(!existsSync(BUNDLE_DIR))("the served bundle contains every file the runner imports", () => {
+  it.skipIf(!existsSync(BUNDLE_DIR) && process.env.RAKAZO_TEST_REQUIRE_BUNDLE !== "1")("the served bundle contains every file the runner imports", () => {
     const loaded = loadRunnerBundle(BUNDLE_DIR);
     expect(loaded).not.toBeNull();
     const served = new Set(RUNNER_FILES.map((f) => f.name));
@@ -90,6 +90,13 @@ describe("installers", () => {
       }
     }
     expect(loaded!.version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it.skipIf(!existsSync(BUNDLE_DIR) && process.env.RAKAZO_TEST_REQUIRE_BUNDLE !== "1")("serves every non-test runner/src/*.ts in the bundle dir", () => {
+    const served = new Set(RUNNER_FILES.map((f) => f.path));
+    const onDisk = readdirSync(join(BUNDLE_DIR, "src")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const f of onDisk) expect(served.has(`src/${f}`), `runner/src/${f} is not in RUNNER_FILES`).toBe(true);
   });
 
   it("rejects odd origins", () => {
