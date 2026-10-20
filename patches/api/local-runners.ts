@@ -267,6 +267,43 @@ export function usageFromSseLine(line: string): { input: number; output: number 
     return null;
   }
 }
+/**
+ * Output cap per shared-local answer. Without it a small model can ramble for the whole
+ * 30 min hard timeout on the owner's GPU (seen on Host-001: qwen2.5:3b, ~45k tokens for
+ * "Reply with just the word OK."), because the idle timeout only fires when tokens stop.
+ * RAKAZO_SHARED_LOCAL_MAX_OUTPUT_TOKENS overrides the default (256..32768).
+ */
+export const DEFAULT_OUTPUT_TOKEN_CAP = 4_096;
+export function outputTokenCap(raw: string | undefined): number {
+  const n = Number.parseInt(String(raw ?? "").trim(), 10);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_OUTPUT_TOKEN_CAP;
+  return Math.min(32_768, Math.max(256, n));
+}
+
+/** Clamp the request's max tokens to the cap (both OpenAI field names; servers read one). */
+export function capRequestBody(body: Record<string, unknown>, cap: number): Record<string, unknown> {
+  const asked = [body.max_tokens, body.max_completion_tokens]
+    .map((v) => (typeof v === "number" ? v : Number.NaN))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  const limit = Math.floor(Math.min(cap, ...asked));
+  return { ...body, max_tokens: limit, max_completion_tokens: limit };
+}
+
+/** A streamed SSE line that carries a completion delta (≈ one token on Ollama/llama.cpp). */
+export function isContentChunk(line: string): boolean {
+  return (
+    line.startsWith("data:") &&
+    line.includes('"choices"') &&
+    !line.includes('"choices":[]') &&
+    !line.includes('"finish_reason":"')
+  );
+}
+
+/** Backstop when a model server ignores max_tokens: stop a bit after the cap. */
+export function overOutputCap(contentChunks: number, cap: number): boolean {
+  return contentChunks > cap + Math.max(64, Math.ceil(cap * 0.1));
+}
+
 const OFFLINE_MESSAGE =
   "This bot runs on the owner's computer, which is offline right now. Try again later.";
 
@@ -301,6 +338,9 @@ type PendingInfer = {
   model?: string;
   startedAt?: number;
   usage?: { input: number; output: number };
+  /** Content chunks streamed so far (output-cap backstop). */
+  contentChunks?: number;
+  outputCap?: number;
   status?: number;
   error?: { message: string; retryable: boolean };
   done: boolean;
@@ -812,6 +852,9 @@ export function createLocalRunnerGateway(deps: {
 
   function recordUsage(p: PendingInfer, status: string): void {
     if (!p.deviceId) return;
+    // An answer cut off mid-stream (cap, idle, cancel) never gets the final usage line:
+    // count the streamed chunks as output tokens so token caps still see them.
+    if (!p.usage && (p.contentChunks ?? 0) > 0) p.usage = { input: 0, output: p.contentChunks ?? 0 };
     const reservation = reservations.get(p.id);
     if (reservation) reservation.usage = p.usage;
     void deps.prisma
@@ -1024,6 +1067,20 @@ export function createLocalRunnerGateway(deps: {
             const u = usageFromSseLine(dataLine);
             if (u) p.usage = u;
             p.chunks.push(dataLine);
+            if (isContentChunk(dataLine)) p.contentChunks = (p.contentChunks ?? 0) + 1;
+            if (p.outputCap && overOutputCap(p.contentChunks ?? 0, p.outputCap)) {
+              // The server ignored max_tokens: stop the runner and end the answer as "length".
+              try {
+                session.ws.send(JSON.stringify({ type: "infer.cancel", id }));
+              } catch {
+                /* ignore */
+              }
+              session.inFlight.delete(id);
+              p.chunks.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })}`);
+              p.chunks.push("data: [DONE]");
+              completePending(id, 200);
+              return;
+            }
             wake(p);
           }
           return;
@@ -1342,6 +1399,8 @@ export function createLocalRunnerGateway(deps: {
       consumerUserId,
       model,
       startedAt: reservations.get(id)?.startedAt ?? Date.now(),
+      contentChunks: 0,
+      outputCap: outputTokenCap(process.env.RAKAZO_SHARED_LOCAL_MAX_OUTPUT_TOKENS),
       hardTimer: setTimeout(() => {
         failPending(id, "Inference hard timeout (30 min)", false);
         try {
@@ -1374,7 +1433,11 @@ export function createLocalRunnerGateway(deps: {
           id,
           model,
           // Ask for token counts in the final chunk (OpenAI-compatible servers; ignored otherwise).
-          body: { ...body, stream: true, stream_options: { include_usage: true, ...((body.stream_options as object) ?? {}) } },
+          body: {
+            ...capRequestBody(body, p.outputCap ?? DEFAULT_OUTPUT_TOKEN_CAP),
+            stream: true,
+            stream_options: { include_usage: true, ...((body.stream_options as object) ?? {}) },
+          },
         }),
       );
     } catch {
