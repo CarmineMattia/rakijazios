@@ -45,3 +45,14 @@ This script sets the throwaway computer's rate limit to 1 per minute, then check
 - the usage API shows the expected numbers, and the chart and the "Save limits" button work in the UI.
 
 It removes its own computer, the bot binding, the grants and the usage rows for that computer.
+
+## 67-output-cap.mjs (shared-local output cap)
+
+Pairs a throwaway runner for qa, binds QA Tester Bot to it, and asks in the private chat for a 20000-word essay. It checks:
+- the run **completes** (it does not stream until the 30 min hard timeout);
+- every usage row is `ok`, with output tokens > 0 and ≤ the cap + 10% (`RK_CAP_TOKENS`, default 4096, matching the api's `RAKAZO_SHARED_LOCAL_MAX_OUTPUT_TOKENS`);
+- the answer is not cut short (≥ 256 output tokens, > 1000 characters), even when the thread history is long;
+- the next short question still gets an answer;
+- 0 secrets in the logs.
+
+It removes its own computer, binding, grants and usage rows.
