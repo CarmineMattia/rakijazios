@@ -27,7 +27,8 @@ function createWindow() {
   });
   mainWindow.loadURL(SERVER_URL);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // Only web links leave the app; never file:, smb:, custom protocol handlers, etc.
+    if (isWebUrl(url)) shell.openExternal(url);
     return { action: "deny" };
   });
   mainWindow.on("close", (e) => {
@@ -83,6 +84,15 @@ function runnerBin() {
   return candidates.find((p) => p && fs.existsSync(p)) || null;
 }
 
+function isWebUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 function startRunner() {
   if (runnerChild) return;
   const bin = runnerBin();
@@ -93,10 +103,8 @@ function startRunner() {
   runnerChild = spawn(bin, ["run"], {
     stdio: "ignore",
     detached: false,
-    env: {
-      ...process.env,
-      RAKAZO_HOST_TOOLS: "1",
-    },
+    // Host tools stay opt-in: the runner inherits the user's own RAKAZO_HOST_TOOLS (default off).
+    env: { ...process.env },
   });
   runnerChild.on("exit", () => {
     runnerChild = null;
