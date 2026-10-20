@@ -100,7 +100,7 @@ export function ensureHostToolPermissionTables(prisma: PrismaClient): Promise<vo
         user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
         device_key TEXT NOT NULL DEFAULT '',
         action TEXT NOT NULL,
-        grant TEXT NOT NULL,
+        "grant" TEXT NOT NULL,
         target TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (user_id, device_key, action, target)
@@ -243,7 +243,7 @@ export async function decideHostToolPermission(
 
   const deviceKey = input.deviceId ?? "";
   const grants = await prisma.$queryRawUnsafe<StandingGrantRow[]>(
-    `SELECT action, grant, NULLIF(target, '') AS target FROM host_tool_standing_grants
+    `SELECT action, "grant", NULLIF(target, '') AS target FROM host_tool_standing_grants
      WHERE user_id = $1 AND device_key IN ($2, '') AND action = $3
      ORDER BY CASE WHEN device_key = $2 THEN 0 ELSE 1 END,
               CASE WHEN target = $4 THEN 0 WHEN target = '' THEN 1 ELSE 2 END`,
@@ -338,9 +338,9 @@ export async function recordStandingGrant(
   await ensureHostToolPermissionTables(prisma);
   if (input.grant === "allow-once") return; // one-shot is not persisted
   await prisma.$executeRawUnsafe(
-    `INSERT INTO host_tool_standing_grants (id, user_id, device_key, action, grant, target, created_at)
+    `INSERT INTO host_tool_standing_grants (id, user_id, device_key, action, "grant", target, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
-     ON CONFLICT (user_id, device_key, action, target) DO UPDATE SET grant = EXCLUDED.grant`,
+     ON CONFLICT (user_id, device_key, action, target) DO UPDATE SET "grant" = EXCLUDED."grant"`,
     input.id,
     input.userId,
     input.deviceId ?? "",
