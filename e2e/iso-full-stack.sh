@@ -8,7 +8,8 @@
 # and an openai-compatible model connection pointing at nothing (the bot runs on the runner).
 #   e2e/iso-full-stack.sh up          -> prints the dir; then:  . <dir>/iso-env.sh  and run e2e scripts
 #   e2e/iso-full-stack.sh down <dir>  -> removes the containers, volumes, network and dir
-# Note: the supervisor mounts /var/run/docker.sock (as on live). Runners in e2e talk to the local
+# Note: the supervisor mounts /var/run/docker.sock (as on live) and may start sandbox containers
+# (rakazo-bot-*) on this project's appdata volume; 'down' removes exactly those. Runners in e2e talk to the local
 # model server like the live e2e runs do (read-only use).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,6 +19,8 @@ compose() { docker compose -p "$P" -f docker-compose.images.yml -f docker-compos
 if [ "${1:-}" = down ]; then
   D="${2:?dir}"; . "$D/iso.vars"
   case "$P" in rkfull-*) ;; *) echo "refusing: $P is not an rkfull-* project"; exit 2 ;; esac
+  # Sandbox computers the stack's supervisor started (rakazo-bot-*) mount only this project's appdata volume.
+  docker ps -aq --filter "volume=${P}_appdata" | xargs -r docker rm -f >/dev/null
   (cd "$D" && compose down -v --remove-orphans >/dev/null 2>&1) || true
   rm -f "/tmp/rk-e2e-$P.lock"; rm -rf "$D" "/tmp/rk-iso-e2e-$P"
   echo "removed $P"; exit 0
