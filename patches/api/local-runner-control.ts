@@ -15,6 +15,7 @@
  *   POST /api/local-runners/devices/:id/check                     → re-check the computer now (health)
  *   POST /api/local-runners/devices/:id/limits   {maxConcurrent?, perUserPerMinute?, dailyRequestCap?, personDailyCap?, dailyTokenCap? (caps: number|null)}
  *   GET  /api/local-runners/usage?days=14                          → owner's usage per day / computer / person
+ *   GET  /api/local-runners/usage.csv?from=YYYY-MM-DD&to=YYYY-MM-DD → owner's usage as CSV (default last 30 days)
  * Runner (no cookie; the one-time code is the credential):
  *   POST /api/local-runners/pair                     {code, name, platform, runnerVersion, existing?}
  * Public installer files (no secrets):
@@ -33,7 +34,11 @@ import {
   LIMIT_BOUNDS,
   limitsFromRow,
   USAGE_ROWS_SQL,
+  USAGE_EXPORT_MAX_ROWS,
   normalizeLimits,
+  parseUsageExportRange,
+  queryUsageExport,
+  usageCsv,
   runnerUpdateAvailable,
   type DeviceLimits,
 } from "./local-runners.js";
@@ -569,6 +574,27 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
         days,
         daily: daily.map((r) => ({ day: r.day, deviceId: r.device_id, requests: r.requests, refused: r.refused, inputTokens: r.input_tokens, outputTokens: r.output_tokens, peerRequests: r.peer_requests })),
         people: people.map((p) => ({ you: p.user_id === uid, name: p.user_id === uid ? "You" : p.name || "Someone", requests: p.requests, refused: p.refused, tokens: p.tokens })),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/local-runners/usage.csv",
+    route(async (c) => {
+      const uid = await userId(c);
+      const range = parseUsageExportRange(c.req.query("from") || undefined, c.req.query("to") || undefined);
+      if (!range.ok) return c.json({ error: range.error }, 400);
+      await ensureLocalRunnerTables(prisma);
+      const rows = await queryUsageExport(prisma, uid, range);
+      if (rows.length > USAGE_EXPORT_MAX_ROWS) return c.json({ error: "Too many rows: pick a shorter date range" }, 413);
+      return new Response(usageCsv(rows, uid), {
+        status: 200,
+        headers: {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="rakijazios-usage-${range.from}_${range.to}.csv"`,
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        },
       });
     }),
   );

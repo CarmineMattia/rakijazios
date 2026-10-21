@@ -1847,6 +1847,134 @@ export const USAGE_ROWS_SQL = `(
     FROM local_runner_usage_daily
 )`;
 
+// ---- Usage CSV export (owner only) ----
+// GET /api/local-runners/usage.csv?from=YYYY-MM-DD&to=YYYY-MM-DD. One row per day / computer /
+// person / model / status, from raw usage plus retention rollups (rolled-up days have no model).
+// Only the signed-in owner's computers; other people appear by display name only (as in the
+// usage table on My hardware), never by email or id.
+
+export const USAGE_EXPORT_DEFAULT_DAYS = 30;
+export const USAGE_EXPORT_MAX_DAYS = 366;
+export const USAGE_EXPORT_MAX_ROWS = 50_000;
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseIsoDay(raw: string): Date | null {
+  if (!ISO_DAY.test(raw)) return null;
+  const d = new Date(`${raw}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== raw ? null : d;
+}
+
+/** Inclusive date range (server days, as the usage chart). Defaults to the last 30 days. */
+export function parseUsageExportRange(
+  fromRaw: string | undefined,
+  toRaw: string | undefined,
+  now: Date = new Date(),
+): { ok: true; from: string; to: string } | { ok: false; error: string } {
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const to = toRaw ? parseIsoDay(toRaw) : today;
+  if (!to) return { ok: false, error: "Use to=YYYY-MM-DD" };
+  const from = fromRaw ? parseIsoDay(fromRaw) : new Date(to.getTime() - (USAGE_EXPORT_DEFAULT_DAYS - 1) * 86_400_000);
+  if (!from) return { ok: false, error: "Use from=YYYY-MM-DD" };
+  if (from > to) return { ok: false, error: "from must be on or before to" };
+  const days = Math.round((to.getTime() - from.getTime()) / 86_400_000) + 1;
+  if (days > USAGE_EXPORT_MAX_DAYS) return { ok: false, error: `At most ${USAGE_EXPORT_MAX_DAYS} days per export` };
+  return { ok: true, from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+}
+
+export type UsageExportRow = {
+  day: string;
+  device_id: string;
+  device_name: string | null;
+  consumer_user_id: string | null;
+  consumer_name: string | null;
+  model_id: string | null;
+  status: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  duration_ms: number;
+};
+
+/** Owner-scoped rows for the export. Every source is filtered by owner_user_id = $1 in SQL. */
+export async function queryUsageExport(
+  prisma: PrismaClient,
+  ownerUserId: string,
+  range: { from: string; to: string },
+): Promise<UsageExportRow[]> {
+  return prisma.$queryRawUnsafe<UsageExportRow[]>(
+    `SELECT to_char(u.day, 'YYYY-MM-DD') AS day, u.device_id, d.name AS device_name,
+            u.consumer_user_id, us.name AS consumer_name, u.model_id, u.status,
+            SUM(u.n)::float8 AS requests, SUM(u.input_tokens)::float8 AS input_tokens,
+            SUM(u.output_tokens)::float8 AS output_tokens, SUM(u.duration_ms)::float8 AS duration_ms
+       FROM (
+         SELECT date_trunc('day', created_at)::date AS day, device_id, consumer_user_id, model_id, status,
+                1::bigint AS n, input_tokens::bigint AS input_tokens, output_tokens::bigint AS output_tokens,
+                duration_ms::bigint AS duration_ms
+           FROM local_runner_usage
+          WHERE owner_user_id = $1 AND created_at >= $2::date AND created_at < $3::date + 1
+         UNION ALL
+         SELECT day, device_id, NULLIF(consumer_user_id, ''), NULL, status,
+                requests::bigint, input_tokens, output_tokens, duration_ms
+           FROM local_runner_usage_daily
+          WHERE owner_user_id = $1 AND day >= $2::date AND day <= $3::date
+       ) AS u
+       LEFT JOIN local_runner_devices d ON d.id = u.device_id AND d.user_id = $1
+       LEFT JOIN "user" us ON us.id = u.consumer_user_id
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+      ORDER BY 1, 3 NULLS LAST, 2, 5 NULLS FIRST, 6 NULLS LAST, 7
+      LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`,
+    ownerUserId,
+    range.from,
+    range.to,
+  );
+}
+
+export const USAGE_CSV_COLUMNS = [
+  "date",
+  "computer",
+  "person",
+  "person_type",
+  "model",
+  "status",
+  "requests",
+  "input_tokens",
+  "output_tokens",
+  "duration_ms",
+] as const;
+
+/** RFC 4180 field; text that a spreadsheet would run as a formula gets a leading apostrophe. */
+export function csvField(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  let v = value;
+  if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** CSV text (CRLF, UTF-8 BOM so spreadsheets read names correctly). */
+export function usageCsv(rows: UsageExportRow[], ownerUserId: string): string {
+  const lines: string[] = [USAGE_CSV_COLUMNS.join(",")];
+  for (const r of rows) {
+    const you = !r.consumer_user_id || r.consumer_user_id === ownerUserId;
+    lines.push(
+      [
+        r.day,
+        r.device_name ?? "Removed computer",
+        you ? "You" : r.consumer_name || "Someone",
+        you ? "you" : "other",
+        r.model_id ?? "",
+        r.status,
+        Number(r.requests),
+        Number(r.input_tokens),
+        Number(r.output_tokens),
+        Number(r.duration_ms),
+      ].map(csvField).join(","),
+    );
+  }
+  return `\ufeff${lines.join("\r\n")}\r\n`;
+}
+
 const ROLLUP_BATCH_SQL = `WITH victims AS (
     SELECT id FROM local_runner_usage
      WHERE created_at < date_trunc('day', NOW()) - $1::int * INTERVAL '1 day'

@@ -279,6 +279,7 @@
     const total = per.reduce((n, x) => n + x.requests, 0);
     if (!total && !per.some((x) => x.refused)) {
       section.append(el("p", "No answers from your computers yet.", { className: "rk-hw-hint", data: { rk: "hw-usage-empty" } }));
+      section.append(usageExport());
       return;
     }
     const max = Math.max(1, ...per.map((x) => x.requests + x.refused));
@@ -318,6 +319,25 @@
       }
       section.append(table);
     }
+    section.append(usageExport());
+  }
+
+  // CSV export of your own computers' usage (date range, inclusive). Plain same-origin link:
+  // the browser downloads it with the session cookie.
+  function usageExport() {
+    const day = (msAgo) => new Date(Date.now() - msAgo).toISOString().slice(0, 10);
+    const wrap = el("p", "", { className: "rk-hw-hint", data: { rk: "hw-usage-export" } });
+    const from = el("input", "", { type: "date", value: day(29 * 86400000), attrs: { "aria-label": "Export from" }, data: { rk: "hw-usage-from" } });
+    const to = el("input", "", { type: "date", value: day(0), attrs: { "aria-label": "Export to" }, data: { rk: "hw-usage-to" } });
+    const link = el("a", "Download CSV", { data: { rk: "hw-usage-csv" }, attrs: { download: "" } });
+    const update = () => {
+      link.href = `${BASE}/usage.csv?from=${encodeURIComponent(from.value)}&to=${encodeURIComponent(to.value)}`;
+    };
+    from.addEventListener("change", update);
+    to.addEventListener("change", update);
+    update();
+    wrap.append("Export usage from ", from, " to ", to, " ", link);
+    return wrap;
   }
 
   // Last "Check now" result per computer (kept across the 10 s list refresh).
