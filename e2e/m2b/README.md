@@ -67,3 +67,9 @@ stack's web dist for 81). Leave ~20 s between scripts: the auth rate limiter sha
 all local requests, and back-to-back magic-link logins can get 429. `e2e/iso-full-stack.sh down <dir>`
 removes everything.
 
+## 68-usage-csv.mjs (usage CSV export)
+
+Synthetic rows on a fake **revoked** computer owned by qa (raw rows + one rollup row), removed at the end.
+Checks the download headers and CSV header, the exact rows for a range, a single day, a rolled-up day,
+400 on a reversed or too-long range, that qa2's export never contains qa's computer, and 401 without a
+session. Needs no runner. Safe on live with the qa accounts, or on an isolated stack (`iso-env.sh`).

@@ -633,3 +633,13 @@ The M1 rule "don't add shared-local bots to shared groups" is lifted: the grant 
 - `GET /api/local-runners/usage` (chart + people) reads raw rows plus rollups, so totals never change when rows are folded. Daily caps only read today's raw rows (never folded).
 - By hand: `scripts/usage-retention.sh [days]` is a dry run (counts per owner); add `--apply` to fold.
 - Tests: `m3b-retention.test.ts`; e2e `66-m3b-retention.mjs` (synthetic qa rows, aborts if a sweep would touch anyone else).
+
+## 20. Usage CSV export (last item of the M3b list)
+
+- `GET /api/local-runners/usage.csv?from=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive, server days like the chart; default the last 30 days, at most 366 days, at most 50,000 rows → 413). Signed-in owner only (401 otherwise); 400 on a bad or reversed range.
+- One row per day / computer / person / model / status, from raw usage **plus** retention rollups (rolled-up days have an empty model). Columns: `date, computer, person, person_type (you|other), model, status, requests, input_tokens, output_tokens, duration_ms`.
+- Privacy: every source is filtered by `owner_user_id` in SQL, so only your own computers appear. Other people show by display name only (as in the people table), never by email or id; a computer that no longer exists shows as "Removed computer".
+- Spreadsheet safety: RFC 4180 quoting, CRLF, UTF-8 BOM; text starting with `= + - @` (or tab/CR) gets a leading `'` so it is never run as a formula.
+- UI: "Export usage from [date] to [date] — Download CSV" under the usage chart on My hardware.
+- Tests: `usage-export.test.ts` (range, CSV, route scoping/401/400/413), `usage-export.postgres.test.ts` (real SQL in ci-boot: owner isolation, rollups, range edges); e2e `68-usage-csv.mjs`.
+- Timeout tuning (the other open M3b item) was not changed: on qa data the 60 s queue wait already covers p90 answer time (38 s) and the #23 output cap bounds the long tail; revisit with real load data.
