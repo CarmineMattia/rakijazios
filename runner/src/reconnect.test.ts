@@ -146,3 +146,43 @@ test("a model server that comes back is reported OK again without waiting for an
   const health = ws.sent.filter((f) => f.type === "health").at(-1)!;
   assert.equal(health.modelServerOk, true);
 });
+
+test("replaced 3 times by another runner on the same key: stand by, never retake a live slot, take over when it is free", async () => {
+  const { c, logs } = await connectedClient(async (input) => modelsOk(String(input)) ?? new Response("", { status: 404 }));
+  const internals = c as unknown as { reconnectTimer: ReturnType<typeof setTimeout> | null; connect: () => void };
+  const lastWait = () => logs.map((l) => /reconnect in (\d+)ms/.exec(l)?.[1]).filter(Boolean).map(Number).at(-1)!;
+  /** Skip the wait: reconnect now and return the new socket's hello. */
+  const reconnectNow = () => {
+    if (internals.reconnectTimer) clearTimeout(internals.reconnectTimer);
+    internals.reconnectTimer = null;
+    internals.connect();
+    const ws = FakeSocket.all.at(-1)!;
+    ws.open();
+    return { ws, hello: ws.sent.find((f) => f.type === "hello")! };
+  };
+  FakeSocket.all.at(-1)!.drop(1000, "replaced");
+  for (let i = 0; i < 2; i++) {
+    const { ws, hello } = reconnectNow();
+    assert.equal(hello.standby, undefined, "still competing");
+    ws.frame({ type: "policy", enabled: true, allowedModels: ["m1"] });
+    ws.drop(1000, "replaced");
+  }
+  assert.equal(c.standby, true);
+  assert.match(logs.join("\n"), /Another runner is using this computer's key, so this runner is standing by.*To fix: stop the other runner/);
+  assert.ok(lastWait() >= 30_000, `standby waits ${lastWait()}ms`);
+  // Probe while the other runner is live: the server refuses with "in-use"; keep standing by.
+  const probe = reconnectNow();
+  assert.equal(probe.hello.standby, true);
+  probe.ws.drop(1000, "in-use");
+  assert.equal(c.standby, true);
+  assert.ok(lastWait() >= 30_000);
+  // The other runner stopped: the probe is accepted and this runner takes over.
+  const free = reconnectNow();
+  assert.equal(free.hello.standby, true);
+  free.ws.frame({ type: "policy", enabled: true, allowedModels: ["m1"] });
+  assert.equal(c.standby, false);
+  assert.match(logs.join("\n"), /this runner took over/);
+  // If the other one comes back and takes over again, stand by at once (history kept).
+  free.ws.drop(1000, "replaced");
+  assert.equal(c.standby, true);
+});

@@ -64,7 +64,7 @@ async function fixture(env: Record<string, string> = {}) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   /** A synthetic runner: connects, says hello, waits for the policy. */
-  async function runner(capabilities = ["inference"]) {
+  async function runner(capabilities = ["inference"], extra: Record<string, unknown> = {}, waitPolicy = true) {
     const ws: Ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/local-runners/ws`);
     sockets.push(ws);
     const frames: Frame[] = [];
@@ -72,8 +72,8 @@ async function fixture(env: Record<string, string> = {}) {
     ws.on("message", (data: Buffer) => frames.push(JSON.parse(data.toString())));
     ws.on("close", (code: number, reason: Buffer) => Object.assign(closed, { code, reason: reason.toString() }));
     await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
-    ws.send(JSON.stringify({ type: "hello", deviceId: "device", token: "synthetic-device-token", offeredModels: [{ id: "test-model" }], runnerVersion: "0.2.4-test", capabilities }));
-    await until(() => frames.some((f) => f.type === "policy"));
+    ws.send(JSON.stringify({ type: "hello", deviceId: "device", token: "synthetic-device-token", offeredModels: [{ id: "test-model" }], runnerVersion: "0.2.4-test", capabilities, ...extra }));
+    if (waitPolicy) await until(() => frames.some((f) => f.type === "policy"));
     return { ws, frames, closed, inferences: () => frames.filter((f) => f.type === "infer.request") };
   }
   const request = (run = "own") =>
@@ -199,6 +199,49 @@ describe("runner drops fail requests at once (no hang, no fallback)", () => {
     expect(Date.now() - t0).toBeLessThan(2_000);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/offline right now.*disconnected: closed/);
+  });
+});
+
+describe("P29 follow-ups", () => {
+  it("P29-1: a dead link reads 'reconnecting' the moment it reads offline (no 'offline' gap before the sweep)", async () => {
+    // Sweep effectively off: only reads notice the dead link.
+    const f = await fixture({ RK_LOCAL_RUNNER_PING_MS: "100", RK_LOCAL_RUNNER_PONG_MISS_MS: "600", RK_LOCAL_RUNNER_SWEEP_MS: "600000" });
+    const r = await f.runner();
+    await sleep(350);
+    expect(f.gateway.deviceInfo("device").state).toBe("online");
+    r.ws._socket.pause();
+    const seen: string[] = [];
+    const end = Date.now() + 2_500;
+    while (Date.now() < end) {
+      const info = f.gateway.deviceInfo("device");
+      if (!info.online) seen.push(`${info.state}:${info.lastDisconnect?.reason}`);
+      await sleep(20);
+    }
+    expect(seen.length).toBeGreaterThan(0);
+    expect([...new Set(seen)]).toEqual(["reconnecting:ping-timeout"]);
+  });
+
+  it("a standby runner never takes over a live session; it takes over once the slot is free", async () => {
+    const f = await fixture();
+    const active = await f.runner();
+    const probe = await f.runner(["inference"], { standby: true }, false);
+    await until(() => probe.closed.reason === "in-use");
+    expect(probe.frames.some((x) => x.type === "policy")).toBe(false);
+    expect(active.closed.reason).toBeUndefined();
+    const info = f.gateway.deviceInfo("device");
+    expect(info.online).toBe(true);
+    expect(info.duplicateRunner).toBe(true);
+    // A request still goes to the active runner.
+    const pending = f.request();
+    await until(() => active.inferences().length === 1);
+    active.ws.send(JSON.stringify({ type: "infer.done", id: active.inferences()[0]!.id, status: 200 }));
+    expect((await pending).status).toBe(200);
+    // The active runner stops: the next standby probe gets the slot.
+    active.ws.terminate();
+    await until(() => !f.gateway.deviceInfo("device").online);
+    const takeover = await f.runner(["inference"], { standby: true });
+    expect(takeover.frames.some((x) => x.type === "policy")).toBe(true);
+    expect(f.gateway.deviceInfo("device").state).toBe("online");
   });
 });
 

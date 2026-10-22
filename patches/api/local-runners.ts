@@ -90,6 +90,8 @@ const TRANSIENT_DROP_REASONS = new Set(["closed", "heartbeat-timeout", "ping-tim
 /** Same key connected this many times in DUPLICATE_WINDOW_MS = two runners fighting over one computer. */
 const DUPLICATE_REPLACEMENTS = 3;
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
+/** A standby runner probes about once a minute; keep the hint while it keeps probing. */
+const STANDBY_HINT_MS = 3 * 60_000;
 
 function envMs(name: string, fallback: number, min: number): number {
   const raw = Number(process.env[name]);
@@ -869,12 +871,23 @@ export function createLocalRunnerGateway(deps: {
     lastDisconnect: { reason: string; at: number } | null;
     lastSeenAt?: number | null;
     replacedAt?: number[];
+    /** Last time a standby runner (same key) was refused because this computer's slot is taken. */
+    standbyAt?: number;
   };
   const pingIntervalMs = envMs("RK_LOCAL_RUNNER_PING_MS", PING_INTERVAL_MS, 50);
   const pongMissMs = envMs("RK_LOCAL_RUNNER_PONG_MISS_MS", PONG_MISS_MS, 200);
-  /** No frame or pong for too long: the link is dead even if TCP has not noticed. */
+  const sweepMs = envMs("RK_LOCAL_RUNNER_SWEEP_MS", Math.min(5_000, pingIntervalMs), 50);
+  /**
+   * No frame or pong for too long: the link is dead even if TCP has not noticed. The
+   * session is dropped the moment anyone notices (a read, a request or the sweep), so
+   * "offline" and the drop reason ("ping-timeout" = reconnecting) always change together.
+   */
   function isStale(session: RunnerSession, now = Date.now()): boolean {
-    return now - session.lastSeenAt > (session.pongSeen ? pongMissMs : HEARTBEAT_MISS_MS);
+    const dead = now - session.lastSeenAt > (session.pongSeen ? pongMissMs : HEARTBEAT_MISS_MS);
+    if (dead && sessionsByDevice.get(session.deviceId) === session) {
+      dropSession(session, session.pongSeen ? "ping-timeout" : "heartbeat-timeout");
+    }
+    return dead;
   }
   const stats = new Map<string, DeviceStats>();
   const statsFor = (deviceId: string): DeviceStats => {
@@ -1142,6 +1155,14 @@ export function createLocalRunnerGateway(deps: {
             if (ws.readyState !== 1) return; // closed while we were checking
             // One live session per computer; other computers of the same owner stay.
             const existing = sessionsByDevice.get(auth.device.id);
+            if (existing && frame.standby === true && !isStale(existing)) {
+              // A runner that kept losing this computer's slot to another runner with the
+              // same key waits in standby: it never takes over a live session, so the newest
+              // runner keeps the slot. It takes over only when the other one is gone.
+              statsFor(auth.device.id).standbyAt = Date.now();
+              ws.close(1000, "in-use");
+              return;
+            }
             if (existing) dropSession(existing, "replaced");
             const capsRaw = Array.isArray(frame.capabilities)
               ? frame.capabilities.filter((x): x is string => typeof x === "string")
@@ -1304,31 +1325,28 @@ export function createLocalRunnerGateway(deps: {
 
   startUsageRetention(deps.prisma);
 
-  // Liveness: ping every runner; drop links that stopped answering (pong miss) or
-  // stopped sending heartbeats. Their in-flight requests fail at once (dropSession).
+  // Liveness: ping every runner (a pong proves the link is alive) and sweep links that
+  // stopped answering or sending heartbeats. Reads also notice a dead link (isStale), so
+  // the sweep is only the backstop; requests on a dropped link fail at once (dropSession).
   setInterval(() => {
-    const now = Date.now();
     for (const session of [...sessionsByDevice.values()]) {
-      if (isStale(session, now)) {
-        dropSession(session, session.pongSeen ? "ping-timeout" : "heartbeat-timeout");
-        continue;
-      }
       try {
         session.ws.ping?.();
       } catch {
         /* closing */
       }
     }
-  }, Math.min(5_000, pingIntervalMs)).unref?.();
+  }, pingIntervalMs).unref?.();
+  setInterval(() => {
+    const now = Date.now();
+    for (const session of [...sessionsByDevice.values()]) isStale(session, now);
+  }, sweepMs).unref?.();
 
   /** Live, non-stale, not paused sessions of an owner. */
   function ownerSessions(ownerUserId: string): RunnerSession[] {
     const out: RunnerSession[] = [];
     for (const session of [...(sessionsByUser.get(ownerUserId) ?? [])]) {
-      if (isStale(session)) {
-        dropSession(session, "stale");
-        continue;
-      }
+      if (isStale(session)) continue;
       if (session.enabled) out.push(session);
     }
     return out;
@@ -1342,10 +1360,7 @@ export function createLocalRunnerGateway(deps: {
   function deviceSession(deviceId: string, model: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
     const session = sessionsByDevice.get(deviceId);
     if (!session) return undefined;
-    if (isStale(session)) {
-      dropSession(session, "stale");
-      return undefined;
-    }
+    if (isStale(session)) return undefined;
     if (!session.enabled) return "paused";
     if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
     // M3: the owner's concurrency limit is checked in proxyChatCompletions (async).
@@ -1777,14 +1792,20 @@ export function createLocalRunnerGateway(deps: {
       };
     },
     deviceInfo(deviceId: string): DeviceLiveInfo {
-      const session = sessionsByDevice.get(deviceId);
+      // Staleness first: a dead link is dropped (and its reason recorded) before the stats
+      // are read, so "offline" never shows without its "reconnecting" reason (P29-1).
+      const live = sessionsByDevice.get(deviceId);
+      const session = live && !isStale(live) ? live : undefined;
       const st = stats.get(deviceId);
       const common = {
         answers: st?.answers ?? 0,
         lastAnswerAt: st?.lastAnswerAt ?? null,
         lastFailure: st?.lastFailure ?? null,
         lastDisconnect: st?.lastDisconnect ?? null,
-        duplicateRunner: (st?.replacedAt ?? []).filter((t) => Date.now() - t < DUPLICATE_WINDOW_MS).length >= DUPLICATE_REPLACEMENTS,
+        // Two runners on one key: they fought (replacements) or one keeps waiting in standby.
+        duplicateRunner:
+          (st?.replacedAt ?? []).filter((t) => Date.now() - t < DUPLICATE_WINDOW_MS).length >= DUPLICATE_REPLACEMENTS ||
+          (st?.standbyAt !== undefined && Date.now() - st.standbyAt < STANDBY_HINT_MS),
       };
       if (!session || isStale(session)) {
         return {

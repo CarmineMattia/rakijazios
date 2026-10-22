@@ -6,6 +6,11 @@
 //   2. kill it (no goodbye): the next run says "reconnecting" at once;
 //   3. stop it cleanly: the next run says "offline right now" at once;
 //   4. the model server dies mid-request: "model server isn't answering", health flips to not OK.
+//   5. P29-2: in a real bot chat (/app/<botId>) "On my PC" opens the bot's picker;
+//   P29-1: while the runner is frozen the device never reads "offline" before "reconnecting";
+//   6. two runners with one key (copied config): they settle within a few replacements, the
+//      older one stands by with a clear log line, the newest keeps the slot, the UI shows the
+//      duplicate hint; when the newest stops, the standby one takes over.
 // Only the computer and pairing this script creates are removed; the bot is restored.
 // Never prints codes or tokens (counts their occurrences in logs, expect 0).
 import { launch, login, api, sql, shot, sleep, waitFor, BASE, OUT, QA_EMAIL, q, container, openHardware } from '../m2a/lib.mjs';
@@ -62,7 +67,8 @@ const devicesBefore = new Set(sql(`select id from local_runner_devices where use
 
 const browser = await launch('qa-rel');
 const page = await browser.newPage();
-page.on('dialog', (d) => d.accept());
+const dialogs = [];
+page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
 page.on('pageerror', (e) => console.log('PAGEERROR', e.message));
 await login(page, QA_EMAIL);
 await page.goto(BASE + '/app', { waitUntil: 'networkidle2' });
@@ -101,6 +107,16 @@ try {
   ok('bound', bind.status, bind.status === 200);
   const botView = (await api(page, `/api/local-runners/bots/${BOT}`)).body;
   ok('botOwnerSeesState', botView && { state: botView.state, online: botView.online, modelServerOk: botView.modelServerOk }, botView?.state === 'online' && botView.modelServerOk === true);
+  // ---------- P29-2: "On my PC" in a real bot chat ----------
+  await page.goto(`${BASE}/app/${BOT}`, { waitUntil: 'networkidle2' });
+  const fabBtn = await waitFor(async () => (await page.$$('#rk-parity-fab button')).length ? true : null, 20000, 500);
+  const nDialogs = dialogs.length;
+  await page.evaluate(() => [...document.querySelectorAll('#rk-parity-fab button')].find((b) => b.textContent === 'On my PC')?.click());
+  const cur = await waitFor(() => page.$eval('[data-rk="bot-runs-on"]', (n) => n.textContent).catch(() => null), 15000, 300);
+  ok('pickerInBotChat', { fab: !!fabBtn, current: cur, alerts: dialogs.slice(nDialogs) }, !!cur && cur.includes(MODEL) && dialogs.length === nDialogs);
+  await shot(page, 'rel-00-picker-in-bot-chat');
+  await page.goto(BASE + '/app', { waitUntil: 'networkidle2' });
+
   const base = await send('Reply with just the word OK.');
   ok('baselineRunCompletes', base, base.status === 'completed');
 
@@ -116,6 +132,9 @@ try {
   await sleep(500); // the first token reached the gateway
   const frozenAt = Date.now();
   signal('SIGSTOP');
+  // P29-1: watch the state the whole freeze; "offline" must never show before "reconnecting".
+  const seenStates = []; let watching = true;
+  const watcher = (async () => { while (watching) { const d = await device(); if (d) seenStates.push(d.state); await sleep(150); } })();
   const fr = await frozenRun;
   ok('midAnswerFreezeFailsFast', fr, fr.status === 'failed' && /went offline during the answer/.test(fr.error) && (Date.now() - frozenAt) < 35000);
   const st = await waitFor(async () => { const d = await device(); return d && d.state === 'reconnecting' ? d : null; }, 20000, 500);
@@ -126,6 +145,9 @@ try {
   const botRe = (await api(page, `/api/local-runners/bots/${BOT}`)).body;
   ok('botOwnerSeesReconnecting', botRe?.state, botRe?.state === 'reconnecting');
   await sleep(Math.max(0, 40000 - (Date.now() - frozenAt))); // long enough to count as a sleep
+  watching = false; await watcher;
+  const firstDown = seenStates.find((x) => x !== 'online');
+  ok('neverOfflineBeforeReconnecting', { samples: seenStates.length, states: [...new Set(seenStates)], firstDown }, firstDown === 'reconnecting' && !seenStates.includes('offline'));
   fake.mode = 'ok';
   for (const res of fake.hung.splice(0)) res.destroy();
   signal('SIGCONT');
@@ -169,7 +191,42 @@ try {
   ok('uiModelServerDown', healthLine, !!healthLine);
   await shot(page, 'rel-02-model-server-down');
   fake.mode = 'ok';
+
+  // ---------- 6. two runners with the same key settle ----------
+  await waitFor(async () => { const d = await device(); return d?.state === 'online' && d.modelServerOk === true ? true : null; }, 60000, 500);
+  fs.mkdirSync(T + '/cfg2', { recursive: true });
+  for (const f of fs.readdirSync(T + '/cfg')) {
+    if (/\.(log|pid|lock)$|^status/.test(f) || !fs.statSync(`${T}/cfg/${f}`).isFile()) continue;
+    fs.copyFileSync(`${T}/cfg/${f}`, `${T}/cfg2/${f}`);
+  }
+  const logA = () => runnerLog();
+  const logB = () => { try { return fs.readFileSync(T + '/cfg2/runner.log', 'utf8'); } catch { return ''; } };
+  const second = spawn(T + '/home/.local/share/rakijazios-runner/rakazo-runner', ['run'], { env: { ...env(), RAKAZO_RUNNER_CONFIG_DIR: T + '/cfg2' }, stdio: 'ignore', detached: true });
+  second.unref(); created.secondPgid = second.pid;
+  const dupAt = Date.now();
+  const standbyRe = /Another runner is using this computer's key, so this runner is standing by/;
+  const settled = await waitFor(() => (standbyRe.test(logA()) ? true : null), 240000, 2000);
+  const replacements = () => (logA().match(/connected and took over|standing by/g) || []).length + (logB().match(/connected and took over|standing by/g) || []).length;
+  ok('duplicateSettles', { seconds: Math.round((Date.now() - dupAt) / 1000), olderStandsBy: !!settled, newerStandsBy: standbyRe.test(logB()) }, !!settled && !standbyRe.test(logB()));
+  const r0 = replacements();
+  await sleep(45000);
+  const dd = await device();
+  ok('staysSettled', { newReplacements: replacements() - r0, state: dd?.state, dup: dd?.duplicateRunner }, replacements() === r0 && dd?.state === 'online' && dd?.duplicateRunner === true);
+  const settledRun = await send('Reply with just the word OK.');
+  ok('runWhileDuplicate', settledRun, settledRun.status === 'completed');
+  await page.reload({ waitUntil: 'networkidle2' }); await openHardware(page);
+  const hint = await waitFor(() => page.$eval(`[data-rk-device="${created.devId}"] [data-rk="hw-duplicate"]`, (n) => n.textContent).catch(() => null), 25000, 1000);
+  ok('uiDuplicateHint', hint, !!hint);
+  await shot(page, 'rel-03-duplicate-settled');
+  try { process.kill(-created.secondPgid, 'SIGTERM'); } catch {}
+  const tookAt = Date.now();
+  const took = await waitFor(() => (/the other runner with this computer's key is gone; this runner took over/.test(logA()) ? true : null), 90000, 1000);
+  const dt = await waitFor(async () => { const d = await device(); return d?.state === 'online' ? d : null; }, 15000, 500);
+  ok('standbyTakesOver', { seconds: Math.round((Date.now() - tookAt) / 1000), state: dt?.state }, !!took && dt?.state === 'online');
+  const takenRun = await send('Reply with just the word OK.');
+  ok('runAfterTakeover', takenRun, takenRun.status === 'completed');
 } finally {
+  if (created.secondPgid) { try { process.kill(-created.secondPgid, 'SIGTERM'); } catch {} }
   stopRunner();
   for (const res of fake.hung.splice(0)) res.destroy();
   const [p, m] = original.split('|');
@@ -183,6 +240,7 @@ try {
   srv.close();
   const logs = ['api', 'worker'].map((s) => spawnSync('docker', ['logs', '--since', startedAt, container(s)], { encoding: 'utf8', maxBuffer: 1 << 28 })).map((x) => x.stdout + x.stderr).join('\n') + runnerLog();
   fs.writeFileSync(`${OUT}/rel-runner.log`, runnerLog().replace(/sl2\.\S+/g, '[token]'));
+  try { fs.writeFileSync(`${OUT}/rel-runner2.log`, fs.readFileSync(T + '/cfg2/runner.log', 'utf8').replace(/sl2\.\S+/g, '[token]')); } catch {}
   const leaks = secrets.filter(Boolean).reduce((n, s) => n + logs.split(s).length - 1, 0);
   ok('secretsInLogs', leaks, leaks === 0);
   fs.writeFileSync(`${OUT}/rel-results.json`, JSON.stringify(results, null, 2));

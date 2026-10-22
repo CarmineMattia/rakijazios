@@ -342,11 +342,23 @@
     }
   }
 
+  /**
+   * The bot whose chat is open. Same parsing as the app's routes (/app/:botId for a bot
+   * chat, /app/g/:groupId for a group; see also bot-time-prefs.js), plus the older
+   * /bots/<id> and ?botId= forms.
+   */
   function currentBotId() {
+    const parts = location.pathname.split("/");
+    if (parts[1] === "app" && parts[2] && parts[2] !== "g") {
+      try {
+        return decodeURIComponent(parts[2]);
+      } catch {
+        return null;
+      }
+    }
     const m = location.pathname.match(/\/bots\/([a-zA-Z0-9_-]+)/);
     if (m) return m[1];
-    const q = new URLSearchParams(location.search).get("botId");
-    return q;
+    return new URLSearchParams(location.search).get("botId");
   }
 
   function installMenu() {
@@ -406,6 +418,7 @@
   }
 
   window.RakijaziosParity = {
+    currentBotId,
     openBotModelPicker,
     openToolPermissions,
     openRoutines,

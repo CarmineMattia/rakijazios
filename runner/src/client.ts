@@ -43,6 +43,14 @@ const WAKE_TICK_MS = 5_000;
 const WAKE_GAP_MS = 30_000;
 /** Backoff step used after the server says another runner with this key took over (15–30 s). */
 const REPLACED_ATTEMPT = 10;
+/** Replaced this often within the window = two runners fighting over one key: stand by. */
+const REPLACED_LIMIT = 3;
+const REPLACED_WINDOW_MS = 10 * 60_000;
+/** In standby, probe for a free slot every 30–60 s (the server refuses while the other runner is live). */
+const STANDBY_RETRY_MS = 60_000;
+export const STANDBY_MESSAGE =
+  "Another runner is using this computer's key, so this runner is standing by and takes over only when the other one stops. " +
+  "To fix: stop the other runner (only one may run per computer), or pair this one as its own computer (Settings → My hardware → Add a computer).";
 
 /** Errors that mean the local model server itself is unreachable (not a bad request). */
 export function isModelServerUnreachable(message: string): boolean {
@@ -67,6 +75,9 @@ export class LocalRunnerClient {
   private teardownCurrent: ((why: string) => void) | null = null;
   /** Times the server replaced this runner's session with another runner using the same key. */
   replacedCount = 0;
+  private replacedAt: number[] = [];
+  /** Waiting for the other runner with this key to stop (never retakes a live session). */
+  standby = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -314,6 +325,7 @@ export class LocalRunnerClient {
         modelServer: this.server?.kind ?? "none",
         capabilities,
         computerUseGate: this.computerUseGate,
+        ...(this.standby ? { standby: true } : {}),
       });
       // The detailed models frame follows the first policy (hello accepted).
       this.clearHeartbeat();
@@ -381,11 +393,25 @@ export class LocalRunnerClient {
       if (ev.reason === "replaced" && this.ws === ws) {
         // The server keeps one session per computer: another runner with this
         // computer's key connected. Coming straight back would make the two
-        // runners knock each other off every second, so wait the long backoff.
+        // runners knock each other off every second, so wait the long backoff;
+        // after REPLACED_LIMIT times, stand by and let the newest runner keep the slot.
+        const now = Date.now();
         this.replacedCount += 1;
+        this.replacedAt = [...this.replacedAt.filter((t) => now - t < REPLACED_WINDOW_MS), now];
         this.reconnectAttempt = Math.max(this.reconnectAttempt, REPLACED_ATTEMPT);
+        if (!this.standby && this.replacedAt.length >= REPLACED_LIMIT) {
+          this.standby = true;
+          this.log(STANDBY_MESSAGE);
+          teardown("standby: another runner is using this computer's key");
+          return;
+        }
         this.log("another runner with this computer's key connected and took over; stop the other runner (only one may run per computer)");
         teardown("replaced by another runner using this computer's key");
+        return;
+      }
+      if (ev.reason === "in-use" && this.ws === ws) {
+        // Standby probe refused: the other runner is still connected.
+        teardown("standby: another runner is using this computer's key");
         return;
       }
       teardown(`closed code=${ev.code} reason=${ev.reason || "-"}`);
@@ -398,7 +424,9 @@ export class LocalRunnerClient {
 
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return;
-    const delay = reconnectDelay(this.reconnectAttempt);
+    const delay = this.standby
+      ? Math.round(STANDBY_RETRY_MS * (0.5 + 0.5 * Math.random()))
+      : reconnectDelay(this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.log(`reconnect in ${delay}ms`);
     this.reconnectTimer = setTimeout(() => {
@@ -435,6 +463,12 @@ export class LocalRunnerClient {
         if (!this.connected) {
           this.connected = true;
           this.reconnectAttempt = 0;
+          if (this.standby) {
+            // The other runner stopped and the slot was free. Keep the replacement history:
+            // if it comes back and takes over again, this runner stands by again at once.
+            this.standby = false;
+            this.log("the other runner with this computer's key is gone; this runner took over");
+          }
           this.status("connected");
           this.sendModels();
           this.healthKey = "";
