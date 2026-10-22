@@ -38,6 +38,16 @@ const MAX_UNAUTHORIZED = 3;
 const SERVER_SILENCE_MS = 50_000;
 /** M2b: socket open + hello accepted (first policy) must happen within this. */
 const CONNECT_TIMEOUT_MS = 20_000;
+/** Wake detector: timers do not run while the computer sleeps, so a long gap between ticks means it just woke up. */
+const WAKE_TICK_MS = 5_000;
+const WAKE_GAP_MS = 30_000;
+/** Backoff step used after the server says another runner with this key took over (15–30 s). */
+const REPLACED_ATTEMPT = 10;
+
+/** Errors that mean the local model server itself is unreachable (not a bad request). */
+export function isModelServerUnreachable(message: string): boolean {
+  return /fetch failed|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENOTFOUND|socket hang up|other side closed|\bterminated\b|UND_ERR_SOCKET/i.test(message);
+}
 
 /**
  * Exponential backoff with jitter (50-100% of the step), so many runners do not
@@ -51,6 +61,12 @@ export function reconnectDelay(attempt: number, random: () => number = Math.rand
 export class LocalRunnerClient {
   private ws: WebSocket | null = null;
   private stopped = false;
+  private wakeTimer: ReturnType<typeof setInterval> | null = null;
+  private lastTickAt = Date.now();
+  /** Tears down the current socket (set while one exists). */
+  private teardownCurrent: ((why: string) => void) | null = null;
+  /** Times the server replaced this runner's session with another runner using the same key. */
+  replacedCount = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -89,7 +105,36 @@ export class LocalRunnerClient {
     await this.refreshModels();
     this.discoveryTimer = setInterval(() => void this.refreshModels(), DISCOVERY_MS);
     this.discoveryTimer.unref?.();
+    this.lastTickAt = Date.now();
+    this.wakeTimer = setInterval(() => this.checkWake(), WAKE_TICK_MS);
+    this.wakeTimer.unref?.();
     this.connect();
+  }
+
+  /**
+   * Called every few seconds. A gap much longer than the tick means the computer
+   * slept (or the process was frozen): the old link is almost certainly dead (the
+   * server drops a silent link after ~15 s), so reconnect right away with a fresh
+   * backoff instead of waiting for the silence check or a long retry delay.
+   */
+  checkWake(now = Date.now()): boolean {
+    const gap = now - this.lastTickAt;
+    this.lastTickAt = now;
+    if (this.stopped || gap < WAKE_GAP_MS) return false;
+    this.log(`woke up after ${Math.round(gap / 1000)}s; reconnecting now`);
+    this.reconnectAttempt = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.connect();
+    } else if (this.teardownCurrent) {
+      this.teardownCurrent("woke from sleep; reconnecting");
+    } else if (!this.ws) {
+      this.connect();
+    }
+    // The model server may have stopped or changed while the computer slept.
+    void this.refreshModels().catch(() => undefined);
+    return true;
   }
 
   private status(state: RunnerStatus["state"], detail?: string): void {
@@ -219,6 +264,9 @@ export class LocalRunnerClient {
     this.discoveryTimer = null;
     if (writeStatus) this.status("stopped");
     this.clearHeartbeat();
+    if (this.wakeTimer) clearInterval(this.wakeTimer);
+    this.wakeTimer = null;
+    this.teardownCurrent = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     for (const [, ctrl] of this.inFlight) ctrl.abort();
@@ -288,6 +336,7 @@ export class LocalRunnerClient {
     const teardown = (why: string) => {
       if (tornDown) return;
       tornDown = true;
+      if (this.teardownCurrent === teardown) this.teardownCurrent = null;
       clearTimeout(connectTimer);
       if (this.ws !== ws && this.ws !== null) {
         // A newer socket already took over; only tidy this one.
@@ -313,6 +362,8 @@ export class LocalRunnerClient {
       this.scheduleReconnect();
     };
 
+    this.teardownCurrent = teardown;
+
     ws.addEventListener("close", (ev) => {
       if (ev.code === 1008 && ev.reason === "unauthorized") {
         this.unauthorized += 1;
@@ -323,6 +374,16 @@ export class LocalRunnerClient {
       }
       if (ev.code === 1008 && ev.reason === "too many attempts") {
         this.reconnectAttempt = Math.max(this.reconnectAttempt, 10); // wait the maximum
+      }
+      if (ev.reason === "replaced" && this.ws === ws) {
+        // The server keeps one session per computer: another runner with this
+        // computer's key connected. Coming straight back would make the two
+        // runners knock each other off every second, so wait the long backoff.
+        this.replacedCount += 1;
+        this.reconnectAttempt = Math.max(this.reconnectAttempt, REPLACED_ATTEMPT);
+        this.log("another runner with this computer's key connected and took over; stop the other runner (only one may run per computer)");
+        teardown("replaced by another runner using this computer's key");
+        return;
       }
       teardown(`closed code=${ev.code} reason=${ev.reason || "-"}`);
     });
@@ -535,9 +596,17 @@ export class LocalRunnerClient {
         });
         return;
       }
-      const message = err instanceof Error ? err.message : String(err);
+      const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : "";
+      const message = `${err instanceof Error ? err.message : String(err)}${cause}`.slice(0, 300);
       this.log(`infer.error id=${frame.id}: ${message}`);
-      this.noteError(`Model ${frame.model}: ${message}`);
+      if (isModelServerUnreachable(message)) {
+        // Show "model server not answering" now, not after the next discovery (60 s).
+        this.serverOk = false;
+        this.noteError(`Model server stopped answering during a request (${frame.model}): ${message}`);
+        this.sendHealth();
+      } else {
+        this.noteError(`Model ${frame.model}: ${message}`);
+      }
       this.send({
         type: "infer.error",
         id: frame.id,

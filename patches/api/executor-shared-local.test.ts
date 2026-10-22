@@ -53,3 +53,20 @@ describe("M3 limit refusals", () => {
     expect(sharedLocalRefusalNotice("person_cap", "Bot", "Ann", "m")).toMatch(/your limit for today is used up/);
   });
 });
+
+describe("reliability notices", () => {
+  it("maps drops, reconnects and model server failures to distinct readable notices", async () => {
+    const { sharedLocalRefusalKind, sharedLocalRefusalNotice } = await import("./executor.js");
+    expect(sharedLocalRefusalKind("502 [shared_local_dropped] Runner disconnected (closed): …")).toBe("dropped");
+    expect(sharedLocalRefusalKind('{"error":{"message":"[shared_local_dropped] Runner disconnected (ping-timeout)","type":"shared_local_disconnected"}}')).toBe("dropped");
+    expect(sharedLocalRefusalKind('503 {"type":"shared_local_reconnecting"}')).toBe("reconnecting");
+    expect(sharedLocalRefusalKind("[shared_local_model_server_down] The model server…")).toBe("model_server_down");
+    expect(sharedLocalRefusalKind("[shared_local_model_error] Local model HTTP 500")).toBe("model_error");
+    expect(sharedLocalRefusalNotice("dropped", "Bot", "Ann", "m")).toBe(
+      "Bot stopped because Ann's computer went offline during the answer. Try again when it's back online.",
+    );
+    expect(sharedLocalRefusalNotice("reconnecting", "Bot", "Ann", "m")).toMatch(/is reconnecting\. Try again in a minute/);
+    expect(sharedLocalRefusalNotice("model_server_down", "Bot", "Ann", "m")).toMatch(/which is online, but its model server .* isn't answering/);
+    expect(sharedLocalRefusalNotice("model_error", "Bot", "Ann", "m")).toMatch(/returned an error/);
+  });
+});

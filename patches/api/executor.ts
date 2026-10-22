@@ -4769,7 +4769,7 @@ export function classifySharedLocalFailure(rawMessage: string): "busy" | "offlin
 }
 
 /** M2b: typed gateway refusals (`[shared_local_<kind>] …`) that are not plain drops. */
-const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|thread_denied|external_denied|unbound|removed|run_ended|rate_limited|daily_cap|person_cap)\b/i;
+const SHARED_LOCAL_TYPED = /\[?shared_local_(paused|model_off|group_denied|thread_denied|external_denied|unbound|removed|run_ended|rate_limited|daily_cap|person_cap|dropped|reconnecting|model_server_down|model_error)\b/i;
 
 export function sharedLocalRefusalKind(rawMessage: string): string | null {
   return SHARED_LOCAL_TYPED.exec(rawMessage)?.[1]?.toLowerCase() ?? null;
@@ -4805,6 +4805,14 @@ export function sharedLocalRefusalNotice(
       return `${botName} runs on ${ownerName}'s computer, and your limit for today is used up. Try again tomorrow.`;
     case "run_ended":
       return `${botName} stopped because this run ended.`;
+    case "dropped":
+      return `${botName} stopped because ${ownerName}'s computer went offline during the answer. Try again when it's back online.`;
+    case "reconnecting":
+      return `${botName} runs on ${ownerName}'s computer, which lost its connection a moment ago and is reconnecting. Try again in a minute.`;
+    case "model_server_down":
+      return `${botName} runs on ${ownerName}'s computer, which is online, but its model server (Ollama, LM Studio, llama.cpp…) isn't answering. ${ownerName} can check it in Settings → My hardware.`;
+    case "model_error":
+      return `${botName}'s model server on ${ownerName}'s computer returned an error. Try again later.`;
     default:
       return `${botName} could not use ${ownerName}'s computer right now. Try again later.`;
   }
