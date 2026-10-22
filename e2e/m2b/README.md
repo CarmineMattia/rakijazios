@@ -72,4 +72,8 @@ removes everything.
 Synthetic rows on a fake **revoked** computer owned by qa (raw rows + one rollup row), removed at the end.
 Checks the download headers and CSV header, the exact rows for a range, a single day, a rolled-up day,
 400 on a reversed or too-long range, that qa2's export never contains qa's computer, and 401 without a
-session. Needs no runner. Safe on live with the qa accounts, or on an isolated stack (`iso-env.sh`).
+session.
+In the browser (Settings → My hardware → Export usage): the picked from/to survive the ~10 s list
+refresh and the real download is `rakijazios-usage-<from>_<to>.csv` with exactly those rows; a reversed
+or longer-than-366-days range shows an inline error, keeps the link disabled (nothing downloads) and
+stays after a refresh; fixing the range re-enables it. Takes ~1 min (waits for two refreshes). Needs no runner. Safe on live with the qa accounts, or on an isolated stack (`iso-env.sh`).
