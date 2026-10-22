@@ -92,7 +92,7 @@ try {
   created.devId = await waitFor(() => sql(`select result_device_id from local_runner_pairings where id='${q(created.pairingId)}' and result_device_id is not null`) || null, 30000);
   ok('newDeviceOnly', !!created.devId && !devicesBefore.has(created.devId), !!created.devId && !devicesBefore.has(created.devId));
   if (!runnerPids().length) startRunner();
-  const d0 = await waitFor(async () => { const d = await device(); return d?.online && d.models.some((m) => m.id === MODEL) && d.health?.report ? d : null; }, 90000);
+  const d0 = await waitFor(async () => { const d = await device(); return d?.online && d.models.some((m) => m.id === MODEL) && d.modelServerOk === true ? d : null; }, 90000, 1000);
   ok('onlineStatusFields', d0 && { state: d0.state, version: d0.runnerVersion, modelServerOk: d0.modelServerOk, dup: d0.duplicateRunner },
     d0?.state === 'online' && d0.modelServerOk === true && d0.duplicateRunner === false && /^0\.2\.4/.test(d0.runnerVersion || ''));
 

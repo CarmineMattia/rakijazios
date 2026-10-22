@@ -133,3 +133,16 @@ test("model-server-unreachable classifier", () => {
     assert.equal(isModelServerUnreachable(m), false, m);
   }
 });
+
+test("a model server that comes back is reported OK again without waiting for an error", async () => {
+  let up = false;
+  const { c, ws } = await connectedClient(async (input) => {
+    if (up) return modelsOk(String(input)) ?? new Response("", { status: 404 });
+    throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:8080") });
+  });
+  assert.equal(c.healthReport().modelServerOk, false);
+  up = true;
+  await c.refreshModels();
+  const health = ws.sent.filter((f) => f.type === "health").at(-1)!;
+  assert.equal(health.modelServerOk, true);
+});

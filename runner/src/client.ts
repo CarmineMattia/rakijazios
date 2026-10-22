@@ -178,6 +178,9 @@ export class LocalRunnerClient {
       this.serverOk = Boolean(found);
     }
     if (!this.server) this.noteError("No local model server is answering on this computer");
+    // Report a change in reachability both ways: a model server that came back must not
+    // keep showing "not answering" (sendHealth only sends when something changed).
+    this.sendHealth();
     const key = `${this.server?.baseUrl ?? ""}|${this.models.map((m) => `${m.id}:${m.contextWindow ?? ""}`).join(",")}`;
     if (key !== this.modelsKey) {
       this.modelsKey = key;
