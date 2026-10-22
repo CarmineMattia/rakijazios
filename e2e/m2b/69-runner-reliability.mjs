@@ -54,7 +54,9 @@ const env = () => { const e = { ...process.env, HOME: T + '/home', RAKAZO_RUNNER
 const runnerPids = () => { try { return execFileSync('pgrep', ['-f', 'rk-rel-e2e/home/.local/share/rakijazios-runner/app/src/index.ts']).toString().trim().split('\n').filter(Boolean).map(Number); } catch { return []; } };
 const signal = (sig) => { for (const pid of runnerPids()) { try { process.kill(pid, sig); } catch {} } };
 const stopRunner = () => { signal('SIGCONT'); signal('SIGTERM'); };
-const startRunner = () => { const c = spawn(T + '/home/.local/share/rakijazios-runner/rakazo-runner', ['run'], { env: env(), stdio: 'ignore', detached: true }); c.unref(); };
+// `run` logs to stdout (only `start` redirects), so append to the config dir's runner.log like `start` does.
+const logTo = (dir) => { const fd = fs.openSync(dir + '/runner.log', 'a', 0o600); return ['ignore', fd, fd]; };
+const startRunner = () => { const c = spawn(T + '/home/.local/share/rakijazios-runner/rakazo-runner', ['run'], { env: env(), stdio: logTo(T + '/cfg'), detached: true }); c.unref(); };
 const runnerLog = () => { try { return fs.readFileSync(T + '/cfg/runner.log', 'utf8'); } catch { return ''; } };
 
 const qaId = sql(`select id from "user" where email='${q(QA_EMAIL)}'`);
@@ -201,7 +203,10 @@ try {
   }
   const logA = () => runnerLog();
   const logB = () => { try { return fs.readFileSync(T + '/cfg2/runner.log', 'utf8'); } catch { return ''; } };
-  const second = spawn(T + '/home/.local/share/rakijazios-runner/rakazo-runner', ['run'], { env: { ...env(), RAKAZO_RUNNER_CONFIG_DIR: T + '/cfg2' }, stdio: 'ignore', detached: true });
+  // The launcher pins the first runner's config dir, so start the second one with its node directly.
+  const PREFIX = T + '/home/.local/share/rakijazios-runner';
+  const nodeBin = (fs.readFileSync(PREFIX + '/rakazo-runner', 'utf8').match(/^exec '([^']+)'/m) || [])[1];
+  const second = spawn(nodeBin, [PREFIX + '/app/src/index.ts', 'run'], { env: { ...env(), RAKAZO_RUNNER_CONFIG_DIR: T + '/cfg2', RAKAZO_RUNNER_SERVICE: SVC + '-2' }, stdio: logTo(T + '/cfg2'), detached: true });
   second.unref(); created.secondPgid = second.pid;
   const dupAt = Date.now();
   const standbyRe = /Another runner is using this computer's key, so this runner is standing by/;
