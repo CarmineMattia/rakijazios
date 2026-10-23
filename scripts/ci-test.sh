@@ -29,7 +29,7 @@ tests=()
 for f in patches/api/*.test.ts; do
   b=$(basename "$f")
   [ "$b" = group-sharing.postgres.test.ts ] && continue   # needs a live Postgres
-  case "$b" in executor-shared-local.test.ts) d=/app/packages/adapters/src/$b ;; *) d=/app/apps/api/src/$b ;; esac
+  case "$b" in executor-shared-local.test.ts|failed-run-notice.test.ts) d=/app/packages/adapters/src/$b ;; *) d=/app/apps/api/src/$b ;; esac
   mounts+=(-v "$ROOT/$f:$d:ro,z"); tests+=("${d#/app/}")
 done
 for f in patches/auth/*.test.ts; do

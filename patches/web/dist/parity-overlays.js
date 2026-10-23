@@ -49,18 +49,28 @@
     const body = panel("On my computer");
     body.append(el("p", "Loading offered models…", { className: "rk-muted" }));
     try {
-      const [offered, binding] = await Promise.all([
+      const [offered, bot] = await Promise.all([
         api("/local-runners/offered-models"),
         api(`/local-runners/bots/${encodeURIComponent(botId)}`),
       ]);
       body.replaceChildren();
-      if (binding.binding) {
-        body.append(
-          el(
-            "p",
-            `Current: ${binding.binding.deviceName} · ${binding.binding.modelId}${binding.binding.online ? "" : " (offline)"}`,
-          ),
-        );
+      // API shapes: offered-models → { devices: [{ id, name, online, state, paused, models: [{ id, availableNow }] }] },
+      // bots/:id → { onMyComputer, deviceId, modelId, online, state, modelServerOk }.
+      const devices = offered.devices || [];
+      const linkText = (d) =>
+        d.paused ? " · paused" : d.online ? "" : d.state === "reconnecting" ? " · reconnecting" : " · offline";
+      if (bot.onMyComputer && bot.deviceId) {
+        const dev = devices.find((d) => d.id === bot.deviceId);
+        const status = bot.online
+          ? bot.modelServerOk === false
+            ? " (model server not answering)"
+            : ""
+          : bot.state === "reconnecting"
+            ? " (reconnecting)"
+            : " (offline)";
+        const current = el("p", `Current: ${dev ? dev.name : "your computer"} · ${bot.modelId || "no model"}${status}`);
+        current.setAttribute("data-rk", "bot-runs-on");
+        body.append(current);
         body.append(
           el("button", "Stop using my computer", {
             style: "margin:6px 0 12px;display:block",
@@ -74,13 +84,15 @@
           }),
         );
       }
-      const models = offered.models || [];
+      const models = devices.flatMap((d) =>
+        (d.models || []).map((m) => ({ deviceId: d.id, deviceName: d.name, modelId: m.id, suffix: linkText(d) })),
+      );
       if (!models.length) {
         body.append(el("p", "No models offered yet. Connect a computer in My hardware and turn models on."));
         return;
       }
       for (const m of models) {
-        const row = el("button", `${m.deviceName} · ${m.modelId}${m.online ? "" : " · offline"}`, {
+        const row = el("button", `${m.deviceName} · ${m.modelId}${m.suffix}`, {
           style:
             "display:block;width:100%;text-align:left;margin:4px 0;padding:8px;border-radius:8px;border:1px solid #2a2a2e;background:#1c1c1f;color:#f2f2f0;cursor:pointer",
           onclick: async () => {
@@ -330,11 +342,23 @@
     }
   }
 
+  /**
+   * The bot whose chat is open. Same parsing as the app's routes (/app/:botId for a bot
+   * chat, /app/g/:groupId for a group; see also bot-time-prefs.js), plus the older
+   * /bots/<id> and ?botId= forms.
+   */
   function currentBotId() {
+    const parts = location.pathname.split("/");
+    if (parts[1] === "app" && parts[2] && parts[2] !== "g") {
+      try {
+        return decodeURIComponent(parts[2]);
+      } catch {
+        return null;
+      }
+    }
     const m = location.pathname.match(/\/bots\/([a-zA-Z0-9_-]+)/);
     if (m) return m[1];
-    const q = new URLSearchParams(location.search).get("botId");
-    return q;
+    return new URLSearchParams(location.search).get("botId");
   }
 
   function installMenu() {
@@ -394,6 +418,7 @@
   }
 
   window.RakijaziosParity = {
+    currentBotId,
     openBotModelPicker,
     openToolPermissions,
     openRoutines,

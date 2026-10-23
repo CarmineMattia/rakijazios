@@ -53,6 +53,8 @@ type WsSocket = {
   send: (data: string) => void;
   close: (code?: number, reason?: string) => void;
   on: (event: string, cb: (...args: unknown[]) => void) => void;
+  /** `ws` protocol-level ping; runners (undici WebSocket) answer with a pong automatically. */
+  ping?: () => void;
 };
 
 /**
@@ -72,6 +74,57 @@ function loadWs(): WsModule {
 }
 
 const HEARTBEAT_MISS_MS = 45_000;
+/**
+ * Reliability: the gateway pings every runner (WebSocket ping) and a pong proves
+ * the link is alive. Once a runner has answered a ping, this much silence means
+ * the link is dead (network loss, sleep, frozen process) and its requests fail
+ * at once instead of after the 45 s heartbeat miss. Runners that never pong keep
+ * the heartbeat rule. Env overrides exist for tests only.
+ */
+const PING_INTERVAL_MS = 5_000;
+const PONG_MISS_MS = 15_000;
+/** After a transient drop, a computer shows "reconnecting" (runners retry within ~30 s). */
+export const RECONNECT_GRACE_MS = 90_000;
+/** Drop reasons after which the runner comes back by itself. */
+const TRANSIENT_DROP_REASONS = new Set(["closed", "heartbeat-timeout", "ping-timeout", "stale"]);
+/** Same key connected this many times in DUPLICATE_WINDOW_MS = two runners fighting over one computer. */
+const DUPLICATE_REPLACEMENTS = 3;
+const DUPLICATE_WINDOW_MS = 10 * 60_000;
+/** A standby runner probes about once a minute; keep the hint while it keeps probing. */
+const STANDBY_HINT_MS = 3 * 60_000;
+
+function envMs(name: string, fallback: number, min: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw >= min ? raw : fallback;
+}
+
+export type DeviceLiveState = "online" | "reconnecting" | "offline";
+
+/** "reconnecting" while a transient drop is recent; otherwise offline. */
+export function liveStateOf(
+  online: boolean,
+  lastDisconnect: { reason: string; at: number } | null | undefined,
+  now = Date.now(),
+): DeviceLiveState {
+  if (online) return "online";
+  if (lastDisconnect && TRANSIENT_DROP_REASONS.has(lastDisconnect.reason) && now - lastDisconnect.at < RECONNECT_GRACE_MS) {
+    return "reconnecting";
+  }
+  return "offline";
+}
+
+/**
+ * Types a runner's inference error for the chat notice: a model server that is not
+ * answering (the computer itself is online) is not "the computer is offline".
+ */
+export function typeRunnerInferError(message: string): string {
+  if (message === "Cancelled" || /^\[shared_local_/.test(message)) return message;
+  if (/^Local model HTTP \d+/.test(message)) return `[shared_local_model_error] ${message}`;
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|socket hang up|other side closed|\bterminated\b|UND_ERR_SOCKET|No local model server/i.test(message)) {
+    return `[shared_local_model_server_down] The model server on the owner's computer isn't answering (${message.slice(0, 160)}).`;
+  }
+  return message;
+}
 /**
  * M2b long runs: an answer may stream for up to HARD_TIMEOUT_MS as long as tokens
  * keep coming; IDLE_TIMEOUT_MS without a single chunk ends it (model stuck or
@@ -370,10 +423,14 @@ type RunnerSession = {
   health: RunnerHealth | null;
   /** P1+: capabilities from hello (inference, host-tools, computer-use). */
   capabilities: Set<string>;
+  /** The runner answered a WebSocket ping (enables the faster pong-miss rule). */
+  pongSeen?: boolean;
 };
 
 type PendingTool = {
   id: string;
+  /** Computer the call went to (fails at once when it disconnects). */
+  deviceId?: string;
   done: boolean;
   ok?: boolean;
   output?: Record<string, unknown>;
@@ -398,6 +455,14 @@ export type RunnerHealth = {
 
 export type DeviceLiveInfo = {
   online: boolean;
+  /** online / reconnecting (recent transient drop) / offline. */
+  state?: DeviceLiveState;
+  /** Last frame or pong from the runner (in memory). */
+  lastSeenAt?: number | null;
+  /** Model server reachability from the runner's last health report (null = unknown). */
+  modelServerOk?: boolean | null;
+  /** Another runner keeps connecting with this computer's key. */
+  duplicateRunner?: boolean;
   connectedAt: number | null;
   modelServer: string | null;
   /** Health view (in memory, since the api started). */
@@ -420,7 +485,7 @@ export type DeviceCheckResult =
   | { online: true; supported: true; health: RunnerHealth };
 
 /** Version of the runner bundle this server hands out (keep in sync with runner/src/index.ts). */
-export const LATEST_RUNNER_VERSION = "0.2.3";
+export const LATEST_RUNNER_VERSION = "0.2.4";
 
 export function runnerUpdateAvailable(version: string | null | undefined): boolean {
   if (!version) return false;
@@ -799,7 +864,31 @@ export function createLocalRunnerGateway(deps: {
     for (const w of waiters) w();
   }
   // Health view per computer, kept across reconnects (in memory; resets when the api restarts).
-  type DeviceStats = { answers: number; lastAnswerAt: number | null; lastFailure: { message: string; at: number } | null; lastDisconnect: { reason: string; at: number } | null };
+  type DeviceStats = {
+    answers: number;
+    lastAnswerAt: number | null;
+    lastFailure: { message: string; at: number } | null;
+    lastDisconnect: { reason: string; at: number } | null;
+    lastSeenAt?: number | null;
+    replacedAt?: number[];
+    /** Last time a standby runner (same key) was refused because this computer's slot is taken. */
+    standbyAt?: number;
+  };
+  const pingIntervalMs = envMs("RK_LOCAL_RUNNER_PING_MS", PING_INTERVAL_MS, 50);
+  const pongMissMs = envMs("RK_LOCAL_RUNNER_PONG_MISS_MS", PONG_MISS_MS, 200);
+  const sweepMs = envMs("RK_LOCAL_RUNNER_SWEEP_MS", Math.min(5_000, pingIntervalMs), 50);
+  /**
+   * No frame or pong for too long: the link is dead even if TCP has not noticed. The
+   * session is dropped the moment anyone notices (a read, a request or the sweep), so
+   * "offline" and the drop reason ("ping-timeout" = reconnecting) always change together.
+   */
+  function isStale(session: RunnerSession, now = Date.now()): boolean {
+    const dead = now - session.lastSeenAt > (session.pongSeen ? pongMissMs : HEARTBEAT_MISS_MS);
+    if (dead && sessionsByDevice.get(session.deviceId) === session) {
+      dropSession(session, session.pongSeen ? "ping-timeout" : "heartbeat-timeout");
+    }
+    return dead;
+  }
   const stats = new Map<string, DeviceStats>();
   const statsFor = (deviceId: string): DeviceStats => {
     let st = stats.get(deviceId);
@@ -871,19 +960,37 @@ export function createLocalRunnerGateway(deps: {
   }
 
   function dropSession(session: RunnerSession, reason: string, closeCode = 1000): void {
+    const st = statsFor(session.deviceId);
+    st.lastSeenAt = Math.max(st.lastSeenAt ?? 0, session.lastSeenAt);
     if (sessionsByDevice.get(session.deviceId) === session) {
       sessionsByDevice.delete(session.deviceId);
-      if (reason !== "replaced") statsFor(session.deviceId).lastDisconnect = { reason: reason.slice(0, 40), at: Date.now() };
+      if (reason !== "replaced") st.lastDisconnect = { reason: reason.slice(0, 40), at: Date.now() };
+    }
+    if (reason === "replaced") {
+      const now = Date.now();
+      st.replacedAt = [...(st.replacedAt ?? []).filter((t) => now - t < DUPLICATE_WINDOW_MS), now].slice(-10);
     }
     const set = sessionsByUser.get(session.userId);
     if (set) {
       set.delete(session);
       if (!set.size) sessionsByUser.delete(session.userId);
     }
+    // Requests on this computer fail now with a typed, readable error (no fallback model).
     for (const id of [...session.inFlight]) {
-      failPending(id, `Runner disconnected (${reason})`, true);
+      failPending(
+        id,
+        reason === "replaced"
+          ? `[shared_local_dropped] Runner disconnected (replaced): the owner's computer reconnected during the answer.`
+          : `[shared_local_dropped] Runner disconnected (${reason.slice(0, 40)}): the owner's computer went offline during the answer.`,
+        true,
+      );
     }
     session.inFlight.clear();
+    for (const [toolId, tool] of pendingTools) {
+      if (tool.deviceId === session.deviceId && !tool.done) {
+        finishTool(toolId, { ok: false, error: `${OFFLINE_MESSAGE} (disconnected: ${reason.slice(0, 40)})` });
+      }
+    }
     try {
       session.ws.close(closeCode, reason.slice(0, 64));
     } catch {
@@ -995,6 +1102,11 @@ export function createLocalRunnerGateway(deps: {
 
   function bindSocket(ws: WsSocket, ip: string): void {
     let session: RunnerSession | null = null;
+    ws.on("pong", () => {
+      if (!session || sessionsByDevice.get(session.deviceId) !== session) return;
+      session.pongSeen = true;
+      session.lastSeenAt = Date.now();
+    });
     let helloTimer = setTimeout(() => {
       try {
         ws.close(1008, "hello timeout");
@@ -1043,6 +1155,14 @@ export function createLocalRunnerGateway(deps: {
             if (ws.readyState !== 1) return; // closed while we were checking
             // One live session per computer; other computers of the same owner stay.
             const existing = sessionsByDevice.get(auth.device.id);
+            if (existing && frame.standby === true && !isStale(existing)) {
+              // A runner that kept losing this computer's slot to another runner with the
+              // same key waits in standby: it never takes over a live session, so the newest
+              // runner keeps the slot. It takes over only when the other one is gone.
+              statsFor(auth.device.id).standbyAt = Date.now();
+              ws.close(1000, "in-use");
+              return;
+            }
             if (existing) dropSession(existing, "replaced");
             const capsRaw = Array.isArray(frame.capabilities)
               ? frame.capabilities.filter((x): x is string => typeof x === "string")
@@ -1182,45 +1302,51 @@ export function createLocalRunnerGateway(deps: {
         }
         if (frame.type === "infer.error") {
           const id = typeof frame.id === "string" ? frame.id : "";
-          const message =
+          const raw =
             typeof frame.message === "string" ? frame.message : "Runner inference error";
           const retryable = Boolean(frame.retryable);
-          if (pending.has(id) && message !== "Cancelled") {
-            statsFor(session.deviceId).lastFailure = { message: shortText(message) ?? "error", at: Date.now() };
+          if (pending.has(id) && raw !== "Cancelled") {
+            statsFor(session.deviceId).lastFailure = { message: shortText(raw) ?? "error", at: Date.now() };
           }
           session.inFlight.delete(id);
-          failPending(id, message, retryable);
+          failPending(id, typeRunnerInferError(raw), retryable);
           return;
         }
       })();
     });
 
-    ws.on("close", () => {
+    ws.on("close", (_code: unknown, reason: unknown) => {
       clearTimeout(helloTimer);
-      if (session) dropSession(session, "closed");
+      // A runner stopped on purpose says so ("runner stop"): offline, not "reconnecting".
+      const why = String(reason ?? "");
+      if (session) dropSession(session, why === "runner stop" ? "stopped" : "closed");
     });
   }
 
   startUsageRetention(deps.prisma);
 
-  // Stale heartbeat sweeper
+  // Liveness: ping every runner (a pong proves the link is alive) and sweep links that
+  // stopped answering or sending heartbeats. Reads also notice a dead link (isStale), so
+  // the sweep is only the backstop; requests on a dropped link fail at once (dropSession).
   setInterval(() => {
-    const now = Date.now();
     for (const session of [...sessionsByDevice.values()]) {
-      if (now - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-        dropSession(session, "heartbeat-timeout");
+      try {
+        session.ws.ping?.();
+      } catch {
+        /* closing */
       }
     }
-  }, 5_000).unref?.();
+  }, pingIntervalMs).unref?.();
+  setInterval(() => {
+    const now = Date.now();
+    for (const session of [...sessionsByDevice.values()]) isStale(session, now);
+  }, sweepMs).unref?.();
 
   /** Live, non-stale, not paused sessions of an owner. */
   function ownerSessions(ownerUserId: string): RunnerSession[] {
     const out: RunnerSession[] = [];
     for (const session of [...(sessionsByUser.get(ownerUserId) ?? [])]) {
-      if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-        dropSession(session, "stale");
-        continue;
-      }
+      if (isStale(session)) continue;
       if (session.enabled) out.push(session);
     }
     return out;
@@ -1234,17 +1360,14 @@ export function createLocalRunnerGateway(deps: {
   function deviceSession(deviceId: string, model: string): RunnerSession | "busy" | "paused" | "no_model" | undefined {
     const session = sessionsByDevice.get(deviceId);
     if (!session) return undefined;
-    if (Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-      dropSession(session, "stale");
-      return undefined;
-    }
+    if (isStale(session)) return undefined;
     if (!session.enabled) return "paused";
     if (!session.allowedModels.has(model) || !session.offeredModels.includes(model)) return "no_model";
     // M3: the owner's concurrency limit is checked in proxyChatCompletions (async).
     return session;
   }
 
-  function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | "person_cap" | undefined): Response {
+  function liveError(kind: "busy" | "paused" | "no_model" | "rate_limited" | "daily_cap" | "person_cap" | undefined, deviceId?: string): Response {
     if (kind === "person_cap") {
       return Response.json(
         { error: { message: "[shared_local_person_cap] Your daily limit on the owner's computer is used up.", type: "shared_local_person_cap" } },
@@ -1284,6 +1407,18 @@ export function createLocalRunnerGateway(deps: {
           },
         },
         { status: 403 },
+      );
+    }
+    if (deviceId && liveStateOf(false, stats.get(deviceId)?.lastDisconnect) === "reconnecting") {
+      // Lost its connection a moment ago; the runner is retrying. Fail fast with a clearer notice.
+      return Response.json(
+        {
+          error: {
+            message: "[shared_local_reconnecting] The owner's computer lost its connection a moment ago and is reconnecting.",
+            type: "shared_local_reconnecting",
+          },
+        },
+        { status: 503, headers: { "retry-after": "30" } },
       );
     }
     return Response.json({ error: { message: OFFLINE_MESSAGE, type: "shared_local_offline" } }, { status: 503 });
@@ -1359,7 +1494,7 @@ export function createLocalRunnerGateway(deps: {
       return Response.json({ error: { message: "model is required" } }, { status: 400 });
     }
     const picked = deviceSession(access.deviceId, model);
-    if (!picked || typeof picked === "string") return liveError(picked);
+    if (!picked || typeof picked === "string") return liveError(picked, access.deviceId);
     if (picked.userId !== ownerUserId) return liveError(undefined);
 
     // M3 limits: owner's concurrency for everyone; per-person rate and daily cap for others.
@@ -1416,7 +1551,7 @@ export function createLocalRunnerGateway(deps: {
         if (ticket.revoked) { session.inFlight.delete(id); return revokedResponse(); }
         if (got === "gone") {
           const live = deviceSession(access.deviceId, model);
-          return liveError(typeof live === "string" ? live : undefined);
+          return liveError(typeof live === "string" ? live : undefined, access.deviceId);
         }
         if (got === "busy") refusal = "busy";
         else {
@@ -1430,7 +1565,7 @@ export function createLocalRunnerGateway(deps: {
             const current = await limitsFor(access.deviceId);
             refusal = await checkQuota(current);
             const live = deviceSession(access.deviceId, model);
-            if (!live || typeof live === "string" || live !== session || live.userId !== ownerUserId || !session.inFlight.has(id)) return liveError(typeof live === "string" ? live : undefined);
+            if (!live || typeof live === "string" || live !== session || live.userId !== ownerUserId || !session.inFlight.has(id)) return liveError(typeof live === "string" ? live : undefined, access.deviceId);
             if (ticket.revoked) return revokedResponse();
             if (signal.aborted) return Response.json({ error: { message: "Cancelled" } }, { status: 499 });
             if (session.inFlight.size > current.maxConcurrent) refusal = "busy";
@@ -1606,12 +1741,12 @@ export function createLocalRunnerGateway(deps: {
     },
     deviceSupportsHostTools(deviceId: string) {
       const session = sessionsByDevice.get(deviceId);
-      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return false;
+      if (!session || isStale(session)) return false;
       return session.capabilities.has("host-tools") && session.enabled;
     },
     async invokeHostTool(deviceId, request) {
       const session = sessionsByDevice.get(deviceId);
-      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
+      if (!session || isStale(session)) {
         return { ok: false, error: OFFLINE_MESSAGE };
       }
       if (!session.capabilities.has("host-tools")) {
@@ -1620,6 +1755,7 @@ export function createLocalRunnerGateway(deps: {
       const timeoutMs = Math.min(Math.max(request.timeoutMs ?? 60_000, 1_000), 10 * 60_000);
       const p: PendingTool = {
         id: request.id,
+        deviceId,
         done: false,
         waiters: [],
         timer: setTimeout(() => {
@@ -1656,19 +1792,37 @@ export function createLocalRunnerGateway(deps: {
       };
     },
     deviceInfo(deviceId: string): DeviceLiveInfo {
-      const session = sessionsByDevice.get(deviceId);
+      // Staleness first: a dead link is dropped (and its reason recorded) before the stats
+      // are read, so "offline" never shows without its "reconnecting" reason (P29-1).
+      const live = sessionsByDevice.get(deviceId);
+      const session = live && !isStale(live) ? live : undefined;
       const st = stats.get(deviceId);
       const common = {
         answers: st?.answers ?? 0,
         lastAnswerAt: st?.lastAnswerAt ?? null,
         lastFailure: st?.lastFailure ?? null,
         lastDisconnect: st?.lastDisconnect ?? null,
+        // Two runners on one key: they fought (replacements) or one keeps waiting in standby.
+        duplicateRunner:
+          (st?.replacedAt ?? []).filter((t) => Date.now() - t < DUPLICATE_WINDOW_MS).length >= DUPLICATE_REPLACEMENTS ||
+          (st?.standbyAt !== undefined && Date.now() - st.standbyAt < STANDBY_HINT_MS),
       };
-      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) {
-        return { online: false, connectedAt: null, modelServer: null, ...common };
+      if (!session || isStale(session)) {
+        return {
+          online: false,
+          state: liveStateOf(false, st?.lastDisconnect),
+          lastSeenAt: Math.max(st?.lastSeenAt ?? 0, session?.lastSeenAt ?? 0) || null,
+          modelServerOk: null,
+          connectedAt: null,
+          modelServer: null,
+          ...common,
+        };
       }
       return {
         online: true,
+        state: "online",
+        lastSeenAt: session.lastSeenAt,
+        modelServerOk: session.health ? session.health.modelServerOk : null,
         connectedAt: session.connectedAt,
         modelServer: session.modelServer,
         runnerVersion: session.runnerVersion || null,
@@ -1684,7 +1838,7 @@ export function createLocalRunnerGateway(deps: {
     },
     async checkDevice(deviceId: string): Promise<DeviceCheckResult> {
       const session = sessionsByDevice.get(deviceId);
-      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return { online: false };
+      if (!session || isStale(session)) return { online: false };
       if (!runnerSupportsHealth(session.runnerVersion)) {
         return { online: true, supported: false, runnerVersion: session.runnerVersion };
       }
@@ -1749,7 +1903,7 @@ export function createLocalRunnerGateway(deps: {
     },
     offeredModels(deviceId: string): string[] {
       const session = sessionsByDevice.get(deviceId);
-      if (!session || Date.now() - session.lastSeenAt > HEARTBEAT_MISS_MS) return [];
+      if (!session || isStale(session)) return [];
       return session.offeredModels.filter((id) => session.allowedModels.has(id)).sort();
     },
     disconnectDevice(deviceId: string, reason: string) {
@@ -1769,7 +1923,7 @@ export function createLocalRunnerGateway(deps: {
         const auth = await authorize(c.req.header("authorization") ?? "");
         if (!auth.ok) return auth.response;
         const live = deviceSession(auth.access.deviceId, auth.access.modelId);
-        if (!live || live === "paused" || live === "no_model") return liveError(live);
+        if (!live || live === "paused" || live === "no_model") return liveError(live, auth.access.deviceId);
         return c.json({
           object: "list",
           data: [

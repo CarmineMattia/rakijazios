@@ -73,7 +73,9 @@
     let data;
     try { data = await api(`/api/local-runners/groups/${encodeURIComponent(group.id)}/runs-on`); } catch { return; }
     if (version !== epoch || !data.bots.length) return;
-    const badge = el('div', data.bots.map(b => `${b.name} runs on ${b.runsOn}${b.online ? '' : ' (offline)'}${b.enabledHere ? '' : ' · not enabled here'}`).join(' · '), { className: 'rk-group-hint' });
+    // Members see the link state and whether the model answers, never device names or hosts.
+    const state = b => !b.online ? (b.state === 'reconnecting' ? ' (reconnecting)' : ' (offline)') : (b.modelServerOk === false ? ' (model server not answering)' : '');
+    const badge = el('div', data.bots.map(b => `${b.name} runs on ${b.runsOn}${state(b)}${b.enabledHere ? '' : ' · not enabled here'}`).join(' · '), { className: 'rk-group-hint' });
     badge.setAttribute('data-rk-runs-on', '1');
     hint.after(badge);
   }

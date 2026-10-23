@@ -323,6 +323,10 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
             name: d.name,
             enabled: d.enabled !== false,
             online: live.online,
+            // Reliability: online / reconnecting / offline, model reachability, two runners on one key.
+            state: live.state ?? (live.online ? "online" : "offline"),
+            modelServerOk: live.modelServerOk ?? null,
+            duplicateRunner: live.duplicateRunner === true,
             modelServer: live.modelServer,
             platform: d.platform,
             runnerVersion: d.runner_version,
@@ -339,7 +343,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
               lastFailure: live.lastFailure ? { message: live.lastFailure.message, at: iso(live.lastFailure.at) } : null,
               lastDisconnect: live.lastDisconnect ? { reason: live.lastDisconnect.reason, at: iso(live.lastDisconnect.at) } : null,
             },
-            lastSeenAt: d.last_seen_at ? new Date(d.last_seen_at).toISOString() : null,
+            lastSeenAt: iso(Math.max(d.last_seen_at ? new Date(d.last_seen_at).getTime() : 0, live.lastSeenAt ?? 0) || null),
             createdAt: new Date(d.created_at).toISOString(),
             legacy: d.paired_via !== "pairing",
             models: models
@@ -645,6 +649,12 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
     );
   }
 
+  /** What owners and members may see about a computer's link (no names, hosts or addresses). */
+  function liveStatus(deviceId: string): { online: boolean; state: string; modelServerOk: boolean | null } {
+    const live = gateway.deviceInfo(deviceId);
+    return { online: live.online, state: live.state ?? (live.online ? "online" : "offline"), modelServerOk: live.modelServerOk ?? null };
+  }
+
   function botView(b: BotRow) {
     const shared = b.model_provider === "shared-local";
     return {
@@ -655,6 +665,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
       modelId: shared ? b.model_id : null,
       // Shared-local but no binding (owner has several computers) or a stale one.
       needsSetup: shared && (!b.device_id || b.bound_model_id !== b.model_id),
+      ...(shared && b.device_id ? liveStatus(b.device_id) : {}),
     };
   }
 
@@ -672,11 +683,12 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
           ORDER BY d.created_at, m.model_id`,
         uid,
       );
-      const devices = new Map<string, { id: string; name: string; online: boolean; paused: boolean; models: unknown[] }>();
+      const devices = new Map<string, { id: string; name: string; online: boolean; state: string; paused: boolean; models: unknown[] }>();
       for (const r of rows) {
         let d = devices.get(r.device_id);
         if (!d) {
-          d = { id: r.device_id, name: r.name, online: gateway.deviceInfo(r.device_id).online, paused: r.enabled === false, models: [] };
+          const live = gateway.deviceInfo(r.device_id);
+          d = { id: r.device_id, name: r.name, online: live.online, state: live.state ?? (live.online ? "online" : "offline"), paused: r.enabled === false, models: [] };
           devices.set(r.device_id, d);
         }
         d.models.push({
@@ -807,7 +819,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
       const bots = await groupLocalBots(group.id);
       return c.json({
         shared: (shares[0]?.n ?? 0) > 0,
-        bots: bots.map((b) => ({ botId: b.bot_id, name: b.name, granted: b.granted, online: b.device_id ? gateway.deviceInfo(b.device_id).online : false })),
+        bots: bots.map((b) => ({ botId: b.bot_id, name: b.name, granted: b.granted, ...(b.device_id ? liveStatus(b.device_id) : { online: false, state: "offline", modelServerOk: null }) })),
       });
     }),
   );
@@ -867,7 +879,7 @@ export function mountLocalRunnerControl(app: Hono, deps: LocalRunnerControlDeps)
           botId: b.bot_id,
           name: b.name,
           runsOn: `${b.owner_name?.trim() || "its owner"}'s computer`,
-          online: b.device_id ? gateway.deviceInfo(b.device_id).online : false,
+          ...(b.device_id ? liveStatus(b.device_id) : { online: false, state: "offline", modelServerOk: null }),
           enabledHere: b.granted,
         })),
       });

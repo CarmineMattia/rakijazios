@@ -77,3 +77,11 @@ In the browser (Settings → My hardware → Export usage): the picked from/to s
 refresh and the real download is `rakijazios-usage-<from>_<to>.csv` with exactly those rows; a reversed
 or longer-than-366-days range shows an inline error, keeps the link disabled (nothing downloads) and
 stays after a refresh; fixing the range re-enables it. Takes ~1 min (waits for two refreshes). Needs no runner. Safe on live with the qa accounts, or on an isolated stack (`iso-env.sh`).
+
+## 70-failed-run-notice.mjs (failed-run notices in history)
+
+Isolated stack only. A throwaway runner on a fake model server; fails four runs (freeze mid-answer,
+kill, clean stop, model server dies) and checks that each gets exactly one `system`/`meta` notice in
+history right after its user message (DB and `threads.get`), that an open chat shows it live, and
+that after reloading the chat every notice is still shown once. Completed runs get no notice.
+Removes only the computer and pairing it creates; restores the bot.
