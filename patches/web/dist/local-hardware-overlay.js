@@ -324,19 +324,57 @@
 
   // CSV export of your own computers' usage (date range, inclusive). Plain same-origin link:
   // the browser downloads it with the session cookie.
+  // The range the user picked is kept across the 10 s list refresh (like openLimits); null = default.
+  const exportRange = { from: null, to: null };
+  const EXPORT_MAX_DAYS = 366; // same rules as the server (parseUsageExportRange)
+  const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+  function parseIsoDay(raw) {
+    if (!ISO_DAY.test(raw)) return null;
+    const d = new Date(`${raw}T00:00:00Z`);
+    return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== raw ? null : d;
+  }
+  function exportRangeError(fromRaw, toRaw) {
+    const from = parseIsoDay(fromRaw || ""), to = parseIsoDay(toRaw || "");
+    if (!from) return "Pick a valid start date.";
+    if (!to) return "Pick a valid end date.";
+    if (from > to) return "The start date must be on or before the end date.";
+    if (Math.round((to - from) / 86400000) + 1 > EXPORT_MAX_DAYS) return `At most ${EXPORT_MAX_DAYS} days per export.`;
+    return "";
+  }
+
   function usageExport() {
     const day = (msAgo) => new Date(Date.now() - msAgo).toISOString().slice(0, 10);
     const wrap = el("p", "", { className: "rk-hw-hint", data: { rk: "hw-usage-export" } });
-    const from = el("input", "", { type: "date", value: day(29 * 86400000), attrs: { "aria-label": "Export from" }, data: { rk: "hw-usage-from" } });
-    const to = el("input", "", { type: "date", value: day(0), attrs: { "aria-label": "Export to" }, data: { rk: "hw-usage-to" } });
+    const from = el("input", "", { type: "date", value: exportRange.from ?? day(29 * 86400000), attrs: { "aria-label": "Export from" }, data: { rk: "hw-usage-from" } });
+    const to = el("input", "", { type: "date", value: exportRange.to ?? day(0), attrs: { "aria-label": "Export to" }, data: { rk: "hw-usage-to" } });
     const link = el("a", "Download CSV", { data: { rk: "hw-usage-csv" }, attrs: { download: "" } });
+    const err = el("span", "", { className: "rk-hw-err", attrs: { role: "alert" }, data: { rk: "hw-usage-error" } });
     const update = () => {
-      link.href = `${BASE}/usage.csv?from=${encodeURIComponent(from.value)}&to=${encodeURIComponent(to.value)}`;
+      const problem = exportRangeError(from.value, to.value);
+      err.textContent = problem ? ` ${problem}` : "";
+      if (problem) {
+        link.removeAttribute("href");
+        link.setAttribute("aria-disabled", "true");
+      } else {
+        link.href = `${BASE}/usage.csv?from=${encodeURIComponent(from.value)}&to=${encodeURIComponent(to.value)}`;
+        link.removeAttribute("aria-disabled");
+      }
     };
-    from.addEventListener("change", update);
-    to.addEventListener("change", update);
+    const remember = () => {
+      exportRange.from = from.value;
+      exportRange.to = to.value;
+      update();
+    };
+    for (const input of [from, to]) {
+      input.addEventListener("input", remember);
+      input.addEventListener("change", remember);
+    }
+    // Never download a range other than the one shown.
+    link.addEventListener("click", (ev) => {
+      if (exportRangeError(from.value, to.value)) ev.preventDefault();
+    });
     update();
-    wrap.append("Export usage from ", from, " to ", to, " ", link);
+    wrap.append("Export usage from ", from, " to ", to, " ", link, err);
     return wrap;
   }
 
