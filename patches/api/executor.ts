@@ -38,6 +38,7 @@ import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
 } from "@rakazo/contracts";
 import { ensureSharedLocalModel, LOCAL_PROVIDER_ID } from "./pi-local-provider.js";
+import { persistFailedRunNotice } from "./failed-run-notice.js";
 import {
   mintSharedLocalRunToken,
   SHARED_LOCAL_PROVIDER_ID,
@@ -1342,6 +1343,19 @@ export function createRunExecutor(deps: ExecutorDeps) {
             error: setupError,
           });
           if (!failed) return;
+          // Rakijazios: keep the notice in chat history (shown after reopening the chat too).
+          await persistFailedRunNotice(
+            (blocks) =>
+              publishMessage(
+                deps,
+                { id: runId, spaceId: run.spaceId, threadId: thread.id, botId: bot.id },
+                "system",
+                blocks,
+              ),
+            run,
+            bot.name,
+            setupError,
+          );
           if (failed.continuationRunId) {
             await deps.jobs
               .enqueue(runContinueJob(failed.continuationRunId))
@@ -4107,6 +4121,19 @@ export function createRunExecutor(deps: ExecutorDeps) {
             error: message,
           });
           if (!failed) return;
+          // Rakijazios: keep the notice in chat history (shown after reopening the chat too).
+          await persistFailedRunNotice(
+            (blocks) =>
+              publishMessage(
+                deps,
+                { id: runId, spaceId: run.spaceId, threadId: thread.id, botId: bot.id },
+                "system",
+                blocks,
+              ),
+            run,
+            bot.name,
+            message,
+          );
           if (failed.continuationRunId) {
             await deps.jobs
               .enqueue(runContinueJob(failed.continuationRunId))

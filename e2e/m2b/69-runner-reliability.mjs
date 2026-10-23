@@ -221,7 +221,7 @@ try {
   ok('runWhileDuplicate', settledRun, settledRun.status === 'completed');
   await page.reload({ waitUntil: 'networkidle2' }); await openHardware(page);
   const hint = await waitFor(() => page.$eval(`[data-rk-device="${created.devId}"] [data-rk="hw-duplicate"]`, (n) => n.textContent).catch(() => null), 25000, 1000);
-  ok('uiDuplicateHint', hint, !!hint);
+  ok('uiDuplicateHint', hint, /one is standing by/.test(hint || '') && !/keep replacing/.test(hint || ''));
   await shot(page, 'rel-03-duplicate-settled');
   try { process.kill(-created.secondPgid, 'SIGTERM'); } catch {}
   const tookAt = Date.now();
