@@ -73,3 +73,11 @@ Synthetic rows on a fake **revoked** computer owned by qa (raw rows + one rollup
 Checks the download headers and CSV header, the exact rows for a range, a single day, a rolled-up day,
 400 on a reversed or too-long range, that qa2's export never contains qa's computer, and 401 without a
 session. Needs no runner. Safe on live with the qa accounts, or on an isolated stack (`iso-env.sh`).
+
+## 70-failed-run-notice.mjs (failed-run notices in history)
+
+Isolated stack only. A throwaway runner on a fake model server; fails four runs (freeze mid-answer,
+kill, clean stop, model server dies) and checks that each gets exactly one `system`/`meta` notice in
+history right after its user message (DB and `threads.get`), that an open chat shows it live, and
+that after reloading the chat every notice is still shown once. Completed runs get no notice.
+Removes only the computer and pairing it creates; restores the bot.

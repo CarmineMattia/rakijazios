@@ -398,7 +398,7 @@
       card.append(
         el(
           "p",
-          "Two runners are using this computer's key and keep replacing each other. Stop one of them: only one runner may run per computer.",
+          "Two runners use this computer's key; one is standing by. Only one runner can be active per computer: stop the other one, or pair it as its own computer (Add a computer).",
           { className: "rk-hw-hint", data: { rk: "hw-duplicate" } },
         ),
       );

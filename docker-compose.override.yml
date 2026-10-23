@@ -23,6 +23,7 @@ services:
     volumes:
       - ./patches/api/model-selection.ts:/app/packages/adapters/src/model-selection.ts:ro,z
       - ./patches/api/executor.ts:/app/packages/adapters/src/executor.ts:ro,z
+      - ./patches/api/failed-run-notice.ts:/app/packages/adapters/src/failed-run-notice.ts:ro,z
       - ./patches/api/docker-sandbox.ts:/app/packages/adapters/src/docker-sandbox.ts:ro,z
       - ./patches/api/host-aware-sandbox.ts:/app/packages/adapters/src/host-aware-sandbox.ts:ro,z
       - ./patches/api/router.ts:/app/apps/api/src/router.ts:ro,z
@@ -72,6 +73,7 @@ services:
     volumes:
       - ./patches/api/model-selection.ts:/app/packages/adapters/src/model-selection.ts:ro,z
       - ./patches/api/executor.ts:/app/packages/adapters/src/executor.ts:ro,z
+      - ./patches/api/failed-run-notice.ts:/app/packages/adapters/src/failed-run-notice.ts:ro,z
       - ./patches/api/docker-sandbox.ts:/app/packages/adapters/src/docker-sandbox.ts:ro,z
       - ./patches/api/host-aware-sandbox.ts:/app/packages/adapters/src/host-aware-sandbox.ts:ro,z
       - ./patches/auth/index.ts:/app/packages/auth/src/index.ts:ro,z
