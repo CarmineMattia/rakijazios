@@ -2,7 +2,7 @@
 # Boot smoke: start the api (pinned app image + this checkout's patches) against a throwaway
 # PostgreSQL, run the real migrations and the patches' CREATE TABLE/ALTER statements, and fail if
 # the api does not come up healthy or logs an SQL error (e.g. 42601 reserved word). Then run the
-# *.postgres.test.ts suites against that database.
+# *.postgres.test.ts suites against that database (group sharing on its own rakazo_sharing_test database).
 #   scripts/ci-boot.sh     (needs docker; isolated: own network, tmpfs database, no published ports)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
@@ -82,13 +82,25 @@ pgmounts=()
 pgtests=()
 for f in patches/api/*.postgres.test.ts; do
   b=$(basename "$f")
-  [ "$b" = group-sharing.postgres.test.ts ] && continue   # needs its own rakazo_sharing_test database
+  [ "$b" = group-sharing.postgres.test.ts ] && continue   # own rakazo_sharing_test database, below
   d=/app/apps/api/src/$b; pgmounts+=(-v "$ROOT/$f:$d:ro,z"); pgtests+=("${d#/app/}")
 done
 if [ "${#pgtests[@]}" -gt 0 ]; then
   docker run --rm --network "$NET" -u 0 "${mounts[@]}" "${pgmounts[@]}" \
     -e RAKAZO_CI_DATABASE_URL="$DBURL" -e VERIFY_HOST_TOOLS_PG=true -e TESTS="${pgtests[*]}" \
     "$IMAGE" sh -c 'cd /app && /app/node_modules/.bin/vitest run $TESTS' || fail=1
+fi
+
+# group-sharing.postgres.test.ts refuses any database not named rakazo_sharing_test (it writes fixtures),
+# so give it its own migrated database on the same throwaway server.
+if [ -e patches/api/group-sharing.postgres.test.ts ]; then
+  echo "== group sharing suite against its own throwaway rakazo_sharing_test database"
+  SHARE_URL="postgres://rakazo:$PGPASS@$P-pg:5432/rakazo_sharing_test"
+  docker exec "$P-pg" createdb -U rakazo rakazo_sharing_test || fail=1
+  d=/app/apps/api/src/group-sharing.postgres.test.ts
+  docker run --rm --network "$NET" -u 0 "${mounts[@]}" -v "$ROOT/patches/api/group-sharing.postgres.test.ts:$d:ro,z" \
+    -e DATABASE_URL="$SHARE_URL" -e VERIFY_DATABASE=1 -e VERIFY_GROUP_SHARING=true -e TESTS="${d#/app/}" \
+    "$IMAGE" sh -c 'cd /app && { pnpm --filter @rakazo/db exec prisma migrate deploy >/tmp/migrate.log 2>&1 || { cat /tmp/migrate.log; exit 1; }; } && /app/node_modules/.bin/vitest run $TESTS' || fail=1
 fi
 
 [ "$fail" = 0 ] && echo "== BOOT SMOKE PASSED" || { echo "== BOOT SMOKE FAILED"; docker logs --tail 60 "$P-api" 2>&1 | tail -60; }
