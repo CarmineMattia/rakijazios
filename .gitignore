@@ -17,3 +17,8 @@ cloudflared.env
 infra/cloudflared/*.json
 infra/cloudflared/config.yml
 cert.pem
+
+# Android signing material never goes in the repo
+*.jks
+*.keystore
+keystore.properties

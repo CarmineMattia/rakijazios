@@ -1,0 +1,62 @@
+plugins {
+    id "com.android.application"
+}
+
+// Host comes from -PtwaHost=... or RAKIJAZIOS_TWA_HOST; never hard-code a real
+// domain or any secret here (the repo is public).
+def twaHost = (System.getenv("RAKIJAZIOS_TWA_HOST") ?: project.findProperty("twaHost") ?: "rakijazios.example.com").toString().trim()
+if (!(twaHost ==~ /^[A-Za-z0-9.-]+(:[0-9]+)?$/)) {
+    throw new GradleException("twaHost must be a bare host name like rakijazios.example.com, got: " + twaHost)
+}
+def launchUrl = "https://" + twaHost + "/app"
+def assetStatements = '[{\\"relation\\": [\\"delegate_permission/common.handle_all_urls\\"], \\"target\\": {\\"namespace\\": \\"web\\", \\"site\\": \\"https://' + twaHost + '\\"}}]'
+
+android {
+    namespace "app.rakijazios.twa"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "app.rakijazios.twa"
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0-poc"
+
+        manifestPlaceholders = [twaHost: twaHost]
+        resValue "string", "launchUrl", launchUrl
+        resValue "string", "asset_statements", assetStatements
+    }
+
+    // Release signing is read from a keystore OUTSIDE the repo (see
+    // docs/android-app.md, "Signing"). Nothing is configured unless the
+    // properties file exists, so CI and fresh clones only build debug.
+    def ksProps = new Properties()
+    def ksFile = file(System.getenv("RAKIJAZIOS_KEYSTORE_PROPERTIES") ?: (System.getProperty("user.home") + "/.config/rakijazios/android/keystore.properties"))
+    if (ksFile.exists()) {
+        ksFile.withInputStream { ksProps.load(it) }
+        signingConfigs {
+            release {
+                storeFile file(ksProps["storeFile"])
+                storePassword ksProps["storePassword"]
+                keyAlias ksProps["keyAlias"]
+                keyPassword ksProps["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (ksFile.exists()) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.google.androidbrowserhelper:androidbrowserhelper:2.7.4"
+}
