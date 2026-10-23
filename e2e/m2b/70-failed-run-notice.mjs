@@ -186,6 +186,8 @@ try {
   const [p, m] = original.split('|');
   sql(`update bots set "modelProvider"=${p ? `'${q(p)}'` : 'null'}, "modelId"=${m ? `'${q(m)}'` : 'null'} where id='${BOT}'`);
   sql(`delete from local_runner_bot_bindings where bot_id='${BOT}'`);
+  // Usage rows of the throwaway computer go too (raw + daily rollup), else they outlive it as orphans.
+  if (created.devId) for (const t of ['local_runner_usage', 'local_runner_usage_daily']) sql(`delete from ${t} where device_id='${q(created.devId)}' and owner_user_id='${qaId}'`);
   if (created.devId) sql(`delete from local_runner_devices where id='${q(created.devId)}' and user_id='${qaId}'`);
   if (created.pairingId) sql(`delete from local_runner_pairings where id='${q(created.pairingId)}' and user_id='${qaId}'`);
   const left = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));

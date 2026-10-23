@@ -25,6 +25,8 @@ const original = sql(`select coalesce("modelProvider",'')||'|'||coalesce("modelI
 // Only what this script creates is removed: its own pairing and the computer that pairing made.
 const created = { pairingId: null, devId: null };
 const cleanupDb = () => {
+  // Usage rows of the throwaway computer go too (raw + daily rollup), else they outlive it as orphans.
+  if (created.devId) for (const t of ['local_runner_usage', 'local_runner_usage_daily']) sql(`delete from ${t} where device_id='${q(created.devId)}' and owner_user_id='${qaId}'`);
   if (created.devId) sql(`delete from local_runner_devices where id='${q(created.devId)}' and user_id='${qaId}'`);
   if (created.pairingId) sql(`delete from local_runner_pairings where id='${q(created.pairingId)}' and user_id='${qaId}'`);
 };
