@@ -16,6 +16,8 @@ export type HelloFrame = {
   /** P1+: e.g. ["inference","host-tools","computer-use"] */
   capabilities?: string[];
   computerUseGate?: boolean;
+  /** 0.2.4+: this runner kept losing the slot to another runner with the same key; never take over a live session. */
+  standby?: boolean;
 };
 
 export type HeartbeatFrame = { type: "heartbeat"; at?: number };

@@ -36,7 +36,7 @@
   #${PANEL_ID} .rk-hw-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   #${PANEL_ID} .rk-hw-name{font-weight:600;font-size:14.5px}
   #${PANEL_ID} .rk-hw-pill{font-size:11.5px;border-radius:999px;padding:1px 8px;border:1px solid currentColor}
-  #${PANEL_ID} .rk-on{color:#3ec5a8} #${PANEL_ID} .rk-off{color:#a1a1aa} #${PANEL_ID} .rk-paused{color:#f59e0b}
+  #${PANEL_ID} .rk-on{color:#3ec5a8} #${PANEL_ID} .rk-off{color:#a1a1aa} #${PANEL_ID} .rk-paused{color:#f59e0b} #${PANEL_ID} .rk-reconn{color:#60a5fa}
   #${PANEL_ID} .rk-hw-meta{color:var(--muted-foreground,#a1a1aa);font-size:12.5px;margin:4px 0 8px}
   #${PANEL_ID} .rk-hw-model{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:6px 0;border-top:1px solid var(--border,rgba(255,255,255,.08))}
   #${PANEL_ID} .rk-hw-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
@@ -378,13 +378,15 @@
       ? el("span", "Paused", { className: "rk-hw-pill rk-paused" })
       : d.online
         ? el("span", "Online", { className: "rk-hw-pill rk-on" })
-        : el("span", "Offline", { className: "rk-hw-pill rk-off" });
+        : d.state === "reconnecting"
+          ? el("span", "Reconnecting…", { className: "rk-hw-pill rk-reconn" })
+          : el("span", "Offline", { className: "rk-hw-pill rk-off" });
     pill.setAttribute("data-rk", "hw-state");
     const rename = el("button", "Rename", { type: "button" });
     row.append(name, pill, rename);
     card.append(row);
     const meta = [
-      d.online ? "Connected now" : `Last seen ${ago(d.lastSeenAt)}`,
+      d.online ? "Connected now" : `Last seen ${ago(d.lastSeenAt)}${d.state === "reconnecting" ? " · connection lost, retrying" : ""}`,
       d.platform,
       d.runnerVersion ? `runner ${d.runnerVersion}` : null,
       d.online ? `model server: ${d.modelServer && d.modelServer !== "none" ? d.modelServer : "none found"}` : null,
@@ -392,6 +394,15 @@
     card.append(el("div", meta.join(" · "), { className: "rk-hw-meta" }));
     const health = healthText(d);
     if (health) card.append(el("div", health, { className: "rk-hw-meta", data: { rk: "hw-health" } }));
+    if (d.duplicateRunner) {
+      card.append(
+        el(
+          "p",
+          "Two runners are using this computer's key and keep replacing each other. Stop one of them: only one runner may run per computer.",
+          { className: "rk-hw-hint", data: { rk: "hw-duplicate" } },
+        ),
+      );
+    }
     if (d.updateAvailable) {
       card.append(
         el(
@@ -531,7 +542,7 @@
       for (const m of d.models) {
         choices.push({
           value: `${d.id}|${m.id}`,
-          label: `${m.id} — ${d.name}${d.paused ? " (paused)" : d.online ? (m.availableNow ? "" : " (not available now)") : " (offline)"}`,
+          label: `${m.id} — ${d.name}${d.paused ? " (paused)" : d.online ? (m.availableNow ? "" : " (not available now)") : d.state === "reconnecting" ? " (reconnecting)" : " (offline)"}`,
           deviceId: d.id,
           modelId: m.id,
         });

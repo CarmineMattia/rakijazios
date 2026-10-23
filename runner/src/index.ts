@@ -51,7 +51,7 @@ import { parseLoopbackBaseUrl } from "./loopback.ts";
 import { EXIT_REFUSED, PID_HEARTBEAT_MS, fileAgeMs, looksLikeRunner, otherRunnerHolding } from "./existing.ts";
 import { PairRefused, pairDevice, platformTag } from "./pair.ts";
 
-export const VERSION = "0.2.3-health";
+export const VERSION = "0.2.4-reliability";
 const SCRIPT = fileURLToPath(import.meta.url);
 
 function arg(argv: string[], name: string): string | undefined {
@@ -207,7 +207,9 @@ async function runForeground(): Promise<void> {
   const shutdown = () => {
     client.stop();
     cleanup();
-    process.exit(0);
+    // Give the "runner stop" close frame a moment to leave, so the server shows this
+    // computer as stopped (offline) rather than "reconnecting".
+    setTimeout(() => process.exit(0), 250);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
