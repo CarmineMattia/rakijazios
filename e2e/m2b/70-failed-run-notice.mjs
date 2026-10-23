@@ -166,7 +166,11 @@ try {
   const shown = {};
   for (const [k, run] of Object.entries({ A, B, C, D })) shown[k] = await where(run.error);
   ok('reopenedShowsEveryNotice', shown, Object.values(shown).every((w) => w.pane >= 1));
-  ok('reopenedNoDuplicates', shown, Object.values(shown).every((w) => w.pane === 1));
+  // On a reused chat (live, after e2e 69) earlier failed runs left notices with the same text, so
+  // "no duplicates" means the page never shows a text more often than history holds it (one per run).
+  const historyCount = (run) => Number(sql(`select count(*) from messages m join runs r on r.id='${q(run.id)}' where m."threadId"=r."threadId" and m.role='system' and m.blocks->0->>'text'='${q(run.error)}'`));
+  for (const [k, run] of Object.entries({ A, B, C, D })) shown[k].inHistory = historyCount(run);
+  ok('reopenedNoDuplicates', shown, Object.values(shown).every((w) => w.pane >= 1 && w.pane <= w.inHistory));
   await shot(page, 'notice-02-reopened');
   const snap = await api(page, '/rpc/threads/get', { method: 'POST', body: JSON.stringify({ json: { botId: BOT } }) }, spaceId);
   const msgs = snap.body?.json?.messages || snap.body?.messages || [];
