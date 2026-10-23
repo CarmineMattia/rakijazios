@@ -361,24 +361,59 @@
     return new URLSearchParams(location.search).get("botId");
   }
 
+  // Bottom-right tool menu. It used to be an always-open stack of six buttons pinned at bottom:16px, which
+  // sat on the composer's send button (390 px and desktop). Now one "Tools" toggle that opens the stack upward,
+  // and the whole menu is kept above the composer (its top edge, re-measured as it grows or the route changes).
+  const FAB_GAP = 8;
+  function placeMenu() {
+    const fab = document.getElementById("rk-parity-fab");
+    if (!fab) return;
+    const comp = document.querySelector('[data-testid="composer-bar"]');
+    const r = comp && comp.getBoundingClientRect();
+    if (r && r.height && r.top > 0) {
+      fab.style.bottom = Math.max(16, Math.round(window.innerHeight - r.top + FAB_GAP)) + "px";
+      fab.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + "px";
+    } else {
+      fab.style.bottom = "16px";
+      fab.style.right = "16px";
+    }
+  }
+  function setMenuOpen(open) {
+    const fab = document.getElementById("rk-parity-fab");
+    if (!fab) return;
+    const list = fab.querySelector('[data-rk="parity-fab-list"]');
+    const toggle = fab.querySelector('[data-rk="parity-fab-toggle"]');
+    list.style.display = open ? "flex" : "none";
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
   function installMenu() {
     if (document.getElementById("rk-parity-fab")) return;
     const fab = el("div", null, {
       id: "rk-parity-fab",
       style:
-        "position:fixed;right:16px;bottom:16px;z-index:99980;display:flex;flex-direction:column;gap:6px",
+        "position:fixed;right:16px;bottom:16px;z-index:99980;display:flex;flex-direction:column;align-items:flex-end;gap:6px",
     });
+    const btnStyle =
+      "background:#1f6feb;color:#fff;border:0;border-radius:999px;padding:8px 12px;cursor:pointer;font:12px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.35)";
+    const list = el("div", null, {
+      style: "display:none;flex-direction:column;align-items:flex-end;gap:6px",
+    });
+    list.dataset.rk = "parity-fab-list";
+    list.id = "rk-parity-fab-list";
     const mk = (label, fn) =>
       el("button", label, {
-        style:
-          "background:#1f6feb;color:#fff;border:0;border-radius:999px;padding:8px 12px;cursor:pointer;font:12px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.35)",
-        onclick: fn,
+        style: btnStyle,
+        onclick: () => {
+          setMenuOpen(false);
+          fn();
+        },
       });
-    fab.append(mk("Permissions", () => openToolPermissions()));
-    fab.append(mk("Marketplace", () => openMarketplace()));
-    fab.append(mk("Connectors", () => openMcpCatalog()));
-    fab.append(mk("Security", () => openAuthStatus()));
-    fab.append(
+    list.append(mk("Permissions", () => openToolPermissions()));
+    list.append(mk("Marketplace", () => openMarketplace()));
+    list.append(mk("Connectors", () => openMcpCatalog()));
+    list.append(mk("Security", () => openAuthStatus()));
+    list.append(
       mk("On my PC", () => {
         const id = currentBotId();
         if (!id) {
@@ -388,7 +423,7 @@
         openBotModelPicker(id);
       }),
     );
-    fab.append(
+    list.append(
       mk("Routines", () => {
         const id = currentBotId();
         if (!id) {
@@ -398,7 +433,32 @@
         openRoutines(id);
       }),
     );
+    const toggle = el("button", "Tools", {
+      style: btnStyle + ";min-height:36px",
+      onclick: () => setMenuOpen(list.style.display === "none"),
+    });
+    toggle.type = "button";
+    toggle.dataset.rk = "parity-fab-toggle";
+    toggle.setAttribute("aria-haspopup", "true");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-controls", "rk-parity-fab-list");
+    toggle.setAttribute("aria-label", "Tools menu");
+    fab.append(list, toggle);
     document.body.append(fab);
+    placeMenu();
+    window.addEventListener("resize", placeMenu);
+    // The composer mounts/unmounts with the route and grows with its text: cheap re-measure.
+    setInterval(placeMenu, 400);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    });
+    document.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (!fab.contains(e.target)) setMenuOpen(false);
+      },
+      true,
+    );
   }
 
   // A tool result can announce a pending approval right away; polling picks it up otherwise.
@@ -427,5 +487,7 @@
     openAuthStatus,
     showApprovalCard,
     pollApprovals,
+    placeMenu,
+    setMenuOpen,
   };
 })();

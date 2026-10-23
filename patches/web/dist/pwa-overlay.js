@@ -1,4 +1,4 @@
-/* Rakijazios PWA: registers the service worker and offers "Install app" on Android/Chromium. */
+/* Rakijazios PWA: registers the service worker and offers "Install app" on Android/Chromium phones/tablets. */
 (() => {
   if (window.__rkPwa) return;
   window.__rkPwa = true;
@@ -49,10 +49,37 @@
 
   const DISMISS = "rk-pwa-install-dismissed";
   const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  // Phones and tablets only: Chromium fires beforeinstallprompt on desktop too, where the toast just covered
+  // the chat header. Touch = primary pointer is coarse (a touchscreen laptop with a mouse/trackpad is not).
+  const touchDevice = () => window.matchMedia("(pointer: coarse)").matches;
+  // Bottom edge of the chat header (row holding chat-header-status), so the toast goes below it, never over it.
+  function headerBottom() {
+    let b = 0;
+    const status = document.querySelector('[data-testid="chat-header-status"]');
+    for (let n = status; n && n !== document.body; n = n.parentElement) {
+      const r = n.getBoundingClientRect();
+      if (r.width >= window.innerWidth * 0.5 && r.height < 160) { b = Math.max(b, r.bottom); break; }
+    }
+    for (const h of document.querySelectorAll("header")) {
+      const r = h.getBoundingClientRect();
+      if (r.height && r.top < 40 && r.bottom < 200) b = Math.max(b, r.bottom);
+    }
+    const t = document.querySelector('[data-testid="transcript"]');
+    const tr = t && t.getBoundingClientRect();
+    if (tr && tr.height && tr.top < 200) b = Math.max(b, tr.top);
+    return Math.round(b);
+  }
+  function place() {
+    const bar = document.getElementById("rk-pwa-install");
+    if (!bar) return;
+    const b = headerBottom();
+    bar.style.top = b ? b + 8 + "px" : "calc(72px + env(safe-area-inset-top))";
+  }
   let deferred = null;
-  function remove() { document.getElementById("rk-pwa-install")?.remove(); }
+  let placer = null;
+  function remove() { document.getElementById("rk-pwa-install")?.remove(); if (placer) { clearInterval(placer); placer = null; } window.removeEventListener("resize", place); }
   function show() {
-    if (!deferred || standalone() || localStorage.getItem(DISMISS)) return;
+    if (!deferred || standalone() || localStorage.getItem(DISMISS) || !touchDevice()) return;
     if (document.getElementById("rk-pwa-install")) return;
     const bar = document.createElement("div");
     bar.id = "rk-pwa-install";
@@ -69,7 +96,12 @@
     no.onclick = () => { localStorage.setItem(DISMISS, String(Date.now())); remove(); };
     bar.append(icon, text, yes, no);
     document.body.append(bar);
+    place();
+    // The header can render after the prompt fires (route change, sidebar toggle): keep it below.
+    window.addEventListener("resize", place);
+    placer = setInterval(place, 500);
   }
   window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); deferred = e; show(); });
   window.addEventListener("appinstalled", () => { deferred = null; remove(); });
+  window.RakijaziosPwa = { show, remove, place, headerBottom, touchDevice };
 })();
