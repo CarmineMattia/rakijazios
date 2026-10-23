@@ -166,7 +166,11 @@ try {
   const shown = {};
   for (const [k, run] of Object.entries({ A, B, C, D })) shown[k] = await where(run.error);
   ok('reopenedShowsEveryNotice', shown, Object.values(shown).every((w) => w.pane >= 1));
-  ok('reopenedNoDuplicates', shown, Object.values(shown).every((w) => w.pane === 1));
+  // On a reused chat (live, after e2e 69) earlier failed runs left notices with the same text, so
+  // "no duplicates" means the page never shows a text more often than history holds it (one per run).
+  const historyCount = (run) => Number(sql(`select count(*) from messages m join runs r on r.id='${q(run.id)}' where m."threadId"=r."threadId" and m.role='system' and m.blocks->0->>'text'='${q(run.error)}'`));
+  for (const [k, run] of Object.entries({ A, B, C, D })) shown[k].inHistory = historyCount(run);
+  ok('reopenedNoDuplicates', shown, Object.values(shown).every((w) => w.pane >= 1 && w.pane <= w.inHistory));
   await shot(page, 'notice-02-reopened');
   const snap = await api(page, '/rpc/threads/get', { method: 'POST', body: JSON.stringify({ json: { botId: BOT } }) }, spaceId);
   const msgs = snap.body?.json?.messages || snap.body?.messages || [];
@@ -182,6 +186,8 @@ try {
   const [p, m] = original.split('|');
   sql(`update bots set "modelProvider"=${p ? `'${q(p)}'` : 'null'}, "modelId"=${m ? `'${q(m)}'` : 'null'} where id='${BOT}'`);
   sql(`delete from local_runner_bot_bindings where bot_id='${BOT}'`);
+  // Usage rows of the throwaway computer go too (raw + daily rollup), else they outlive it as orphans.
+  if (created.devId) for (const t of ['local_runner_usage', 'local_runner_usage_daily']) sql(`delete from ${t} where device_id='${q(created.devId)}' and owner_user_id='${qaId}'`);
   if (created.devId) sql(`delete from local_runner_devices where id='${q(created.devId)}' and user_id='${qaId}'`);
   if (created.pairingId) sql(`delete from local_runner_pairings where id='${q(created.pairingId)}' and user_id='${qaId}'`);
   const left = new Set(sql(`select id from local_runner_devices where user_id='${qaId}'`).split('\n').filter(Boolean));
